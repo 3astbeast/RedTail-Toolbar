@@ -379,6 +379,11 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         #endregion
 
         #region Mouse Events
+        // Track what part of the rectangle is being edited
+        private enum EditMode { None, TopLeft, TopRight, BottomLeft, BottomRight, TopEdge, BottomEdge, LeftEdge, RightEdge, Move }
+        private EditMode    currentEditMode;
+        private ChartAnchor lastMoveDataPoint;
+
         public override Cursor GetCursor(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, System.Windows.Point point)
         {
             if (DrawingState == DrawingState.Building)
@@ -455,8 +460,10 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                     DrawingState = DrawingState.Normal;
                     IsSelected = false;
                 }
+                return;
             }
-            else if (DrawingState == DrawingState.Normal)
+
+            if (DrawingState == DrawingState.Normal && IsSelected)
             {
                 System.Windows.Point p = dataPoint.GetPoint(chartControl, chartPanel, chartScale);
                 float x1, y1, x2, y2;
@@ -466,39 +473,139 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 float py = (float)p.Y;
                 float tolerance = 8;
 
-                // Corners
-                if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y1) < tolerance) { DrawingState = DrawingState.Editing; return; }
-                if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y1) < tolerance) { DrawingState = DrawingState.Editing; return; }
-                if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y2) < tolerance) { DrawingState = DrawingState.Editing; return; }
-                if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y2) < tolerance) { DrawingState = DrawingState.Editing; return; }
+                // Corners - allow resizing from any corner
+                if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y1) < tolerance)
+                    { currentEditMode = EditMode.TopLeft; DrawingState = DrawingState.Editing; return; }
+                if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y1) < tolerance)
+                    { currentEditMode = EditMode.TopRight; DrawingState = DrawingState.Editing; return; }
+                if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y2) < tolerance)
+                    { currentEditMode = EditMode.BottomLeft; DrawingState = DrawingState.Editing; return; }
+                if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y2) < tolerance)
+                    { currentEditMode = EditMode.BottomRight; DrawingState = DrawingState.Editing; return; }
 
-                // Edges
-                if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y1) < tolerance) { DrawingState = DrawingState.Editing; return; }
-                if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y2) < tolerance) { DrawingState = DrawingState.Editing; return; }
-                if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x1) < tolerance) { DrawingState = DrawingState.Editing; return; }
-                if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x2) < tolerance) { DrawingState = DrawingState.Editing; return; }
+                // Edges - allow resizing one dimension
+                if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y1) < tolerance)
+                    { currentEditMode = EditMode.TopEdge; DrawingState = DrawingState.Editing; return; }
+                if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y2) < tolerance)
+                    { currentEditMode = EditMode.BottomEdge; DrawingState = DrawingState.Editing; return; }
+                if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x1) < tolerance)
+                    { currentEditMode = EditMode.LeftEdge; DrawingState = DrawingState.Editing; return; }
+                if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x2) < tolerance)
+                    { currentEditMode = EditMode.RightEdge; DrawingState = DrawingState.Editing; return; }
 
-                // Inside = Move
+                // Inside = Move the whole thing
                 if (px >= x1 && px <= x2 && py >= y1 && py <= y2)
                 {
+                    currentEditMode = EditMode.Move;
+                    lastMoveDataPoint = new ChartAnchor();
+                    dataPoint.CopyDataValues(lastMoveDataPoint);
+                    lastMoveDataPoint.DrawingTool = this;
                     DrawingState = DrawingState.Moving;
+                    return;
                 }
             }
         }
 
         public override void OnMouseMove(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
         {
+            // === BUILDING ===
             if (DrawingState == DrawingState.Building && !StartAnchor.IsEditing)
             {
                 dataPoint.CopyDataValues(EndAnchor);
+                return;
+            }
+
+            // === EDITING: resize corners or edges ===
+            if (DrawingState == DrawingState.Editing)
+            {
+                // Determine which anchor holds the min/max time and price
+                // StartAnchor and EndAnchor define two opposite corners
+                // We need to figure out which anchor's Time/Price to update
+                bool startIsLeft  = StartAnchor.Time <= EndAnchor.Time;
+                bool startIsTop   = StartAnchor.Price >= EndAnchor.Price;
+
+                // Map screen corners to anchor properties:
+                // TopLeft     = (earlier time, higher price)
+                // TopRight    = (later time, higher price)
+                // BottomLeft  = (earlier time, lower price)
+                // BottomRight = (later time, lower price)
+
+                ChartAnchor leftAnchor   = startIsLeft ? StartAnchor : EndAnchor;
+                ChartAnchor rightAnchor  = startIsLeft ? EndAnchor : StartAnchor;
+                ChartAnchor topAnchor    = startIsTop ? StartAnchor : EndAnchor;
+                ChartAnchor bottomAnchor = startIsTop ? EndAnchor : StartAnchor;
+
+                switch (currentEditMode)
+                {
+                    case EditMode.TopLeft:
+                        leftAnchor.Time      = dataPoint.Time;
+                        leftAnchor.SlotIndex = dataPoint.SlotIndex;
+                        topAnchor.Price      = dataPoint.Price;
+                        break;
+                    case EditMode.TopRight:
+                        rightAnchor.Time      = dataPoint.Time;
+                        rightAnchor.SlotIndex = dataPoint.SlotIndex;
+                        topAnchor.Price       = dataPoint.Price;
+                        break;
+                    case EditMode.BottomLeft:
+                        leftAnchor.Time        = dataPoint.Time;
+                        leftAnchor.SlotIndex   = dataPoint.SlotIndex;
+                        bottomAnchor.Price     = dataPoint.Price;
+                        break;
+                    case EditMode.BottomRight:
+                        rightAnchor.Time      = dataPoint.Time;
+                        rightAnchor.SlotIndex = dataPoint.SlotIndex;
+                        bottomAnchor.Price    = dataPoint.Price;
+                        break;
+                    case EditMode.TopEdge:
+                        topAnchor.Price = dataPoint.Price;
+                        break;
+                    case EditMode.BottomEdge:
+                        bottomAnchor.Price = dataPoint.Price;
+                        break;
+                    case EditMode.LeftEdge:
+                        leftAnchor.Time      = dataPoint.Time;
+                        leftAnchor.SlotIndex = dataPoint.SlotIndex;
+                        break;
+                    case EditMode.RightEdge:
+                        rightAnchor.Time      = dataPoint.Time;
+                        rightAnchor.SlotIndex = dataPoint.SlotIndex;
+                        break;
+                }
+                return;
+            }
+
+            // === MOVING: translate both anchors ===
+            if (DrawingState == DrawingState.Moving && lastMoveDataPoint != null)
+            {
+                foreach (ChartAnchor anchor in Anchors)
+                    anchor.MoveAnchor(lastMoveDataPoint, dataPoint, chartControl, chartPanel, chartScale, this);
+
+                dataPoint.CopyDataValues(lastMoveDataPoint);
+                return;
             }
         }
 
         public override void OnMouseUp(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
         {
-            if (DrawingState == DrawingState.Editing || DrawingState == DrawingState.Moving)
+            if (DrawingState == DrawingState.Building)
+                return;
+
+            if (DrawingState == DrawingState.Editing)
             {
+                currentEditMode = EditMode.None;
                 DrawingState = DrawingState.Normal;
+                IsSelected = true;
+                return;
+            }
+
+            if (DrawingState == DrawingState.Moving)
+            {
+                currentEditMode = EditMode.None;
+                lastMoveDataPoint = null;
+                DrawingState = DrawingState.Normal;
+                IsSelected = true;
+                return;
             }
         }
         #endregion
@@ -510,16 +617,13 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             float x1, y1, x2, y2;
             GetRectPixelCoords(chartControl, chartPanel, chartScale, out x1, out y1, out x2, out y2);
 
+            // Just the 4 corners for click-to-select hit testing
             return new System.Windows.Point[]
             {
                 new System.Windows.Point(x1, y1),
                 new System.Windows.Point(x2, y1),
                 new System.Windows.Point(x1, y2),
                 new System.Windows.Point(x2, y2),
-                new System.Windows.Point((x1 + x2) / 2, y1),
-                new System.Windows.Point((x1 + x2) / 2, y2),
-                new System.Windows.Point(x1, (y1 + y2) / 2),
-                new System.Windows.Point(x2, (y1 + y2) / 2),
             };
         }
         #endregion
@@ -684,23 +788,27 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             }
 
             // --- Draw Anchor Points when selected ---
-            if (IsSelected)
+            if (IsSelected || DrawingState == DrawingState.Editing)
             {
-                float anchorSize = 5;
-                SharpDX.Direct2D1.Brush anchorBrush = borderBrushDx;
+                float anchorSize = 6f;
 
-                // Corners
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(x1, y1), anchorSize, anchorSize), anchorBrush);
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(x2, y1), anchorSize, anchorSize), anchorBrush);
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(x1, y2), anchorSize, anchorSize), anchorBrush);
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(x2, y2), anchorSize, anchorSize), anchorBrush);
+                // 4 corner handles - white fill with blue ring
+                SharpDX.Vector2[] corners = new SharpDX.Vector2[]
+                {
+                    new SharpDX.Vector2(x1, y1),
+                    new SharpDX.Vector2(x2, y1),
+                    new SharpDX.Vector2(x1, y2),
+                    new SharpDX.Vector2(x2, y2),
+                };
 
-                // Edge midpoints
-                float smallSize = anchorSize * 0.65f;
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2((x1 + x2) / 2f, y1), smallSize, smallSize), anchorBrush);
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2((x1 + x2) / 2f, y2), smallSize, smallSize), anchorBrush);
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(x1, midY), smallSize, smallSize), anchorBrush);
-                rt.FillEllipse(new SharpDX.Direct2D1.Ellipse(new SharpDX.Vector2(x2, midY), smallSize, smallSize), anchorBrush);
+                foreach (SharpDX.Vector2 corner in corners)
+                {
+                    SharpDX.Direct2D1.Ellipse ellipse = new SharpDX.Direct2D1.Ellipse(corner, anchorSize, anchorSize);
+                    using (SharpDX.Direct2D1.SolidColorBrush fillBr = new SharpDX.Direct2D1.SolidColorBrush(rt, new SharpDX.Color4(1f, 1f, 1f, 1f)))
+                        rt.FillEllipse(ellipse, fillBr);
+                    using (SharpDX.Direct2D1.SolidColorBrush ringBr = new SharpDX.Direct2D1.SolidColorBrush(rt, new SharpDX.Color4(0.12f, 0.56f, 1f, 1f)))
+                        rt.DrawEllipse(ellipse, ringBr, 2f);
+                }
             }
         }
         #endregion
