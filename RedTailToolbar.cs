@@ -11,8 +11,11 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using System.Windows.Interop;
 using System.Xml.Serialization;
+using System.Xml;
 using NinjaTrader.Cbi;
 using NinjaTrader.Core;
 using NinjaTrader.Data;
@@ -69,6 +72,29 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         private const uint KEYEVENTF_KEYDOWN = 0x0000;
         private const uint KEYEVENTF_KEYUP   = 0x0002;
 
+        // P/Invoke for screenshot (captures DX content via screen copy)
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
+        [DllImport("gdi32.dll")]
+        private static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height, IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr hdc);
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+        private const uint SRCCOPY = 0x00CC0020;
+
         // NT Menu items
         private Dictionary<string, MenuItem> ntDrawingMenuItems;
         private MenuItem                    ntHideAllMenuItem;
@@ -110,6 +136,17 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             NinjaTrader.Core.Globals.UserDataDir, "RedTailIndicatorVisibility.txt");
         private HashSet<string> hiddenIndicators;
 
+        // Command Center
+        private static readonly string TemplateDir = Path.Combine(
+            NinjaTrader.Core.Globals.UserDataDir, "templates", "Indicator");
+
+        // Screenshot
+        private Button                      screenshotButton;
+
+        // Timeframe Switcher
+        private StackPanel                  tfPanel;
+        private FrameworkElement            cachedIntervalSelector;
+
         #endregion
 
         #region Lifecycle
@@ -138,6 +175,11 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 BreakEvenTicks          = 0;
                 ShowPanButton           = true;
                 ShowIndicatorManager    = true;
+                ShowCommandCenter      = true;
+                ShowScreenshot         = true;
+                ScreenshotFolder       = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "RedTail Screenshots");
+                ShowTimeframeSwitcher  = true;
+                TimeframeList          = "1,3,5,15,60";
             }
             else if (State == State.DataLoaded)
             {
@@ -505,6 +547,24 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 p.Children.Add(indBtn);
             }
 
+            // Command Center
+            if (ShowCommandCenter)
+            {
+                var ccBtn = new Button
+                {
+                    Width = BtnSize + 4, Height = BtnSize - 4, Background = ButtonBg,
+                    BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand, ToolTip = "RedTail Command Center",
+                    Margin = new Thickness(2, 0, 2, 0), Padding = new Thickness(2),
+                    Content = MakeCommandCenterIcon(BtnSize - 10),
+                    Style = FlatStyle()
+                };
+                ccBtn.Click      += ShowCommandCenter_Click;
+                ccBtn.MouseEnter += (s, e) => ccBtn.Background = ButtonHoverBg;
+                ccBtn.MouseLeave += (s, e) => ccBtn.Background = ButtonBg;
+                p.Children.Add(ccBtn);
+            }
+
             AddSep(p);
 
             // Visibility
@@ -601,6 +661,34 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 panButton.MouseEnter += (s, e) => panButton.Background = ButtonHoverBg;
                 panButton.MouseLeave += (s, e) => panButton.Background = panMode ? FB(50, 255, 193, 7) : ButtonBg;
                 p.Children.Add(panButton);
+            }
+
+            // Screenshot
+            if (ShowScreenshot)
+            {
+                AddSep(p);
+                screenshotButton = new Button
+                {
+                    Width = BtnSize + 4, Height = BtnSize - 4, Background = ButtonBg,
+                    BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand, ToolTip = "Screenshot Chart",
+                    Margin = new Thickness(2, 0, 2, 0), Padding = new Thickness(2),
+                    Content = MakeScreenshotIcon(BtnSize - 10),
+                    Style = FlatStyle()
+                };
+                screenshotButton.Click      += ScreenshotClick;
+                screenshotButton.MouseEnter += (s, e) => screenshotButton.Background = ButtonHoverBg;
+                screenshotButton.MouseLeave += (s, e) => screenshotButton.Background = ButtonBg;
+                p.Children.Add(screenshotButton);
+            }
+
+            // Timeframe Switcher
+            if (ShowTimeframeSwitcher)
+            {
+                AddSep(p);
+                tfPanel = new StackPanel { Orientation = Orientation.Horizontal };
+                BuildTimeframeButtons();
+                p.Children.Add(tfPanel);
             }
 
             return p;
@@ -994,10 +1082,14 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
             // RedTail custom tools
             if (h.Contains("redtail") && h.Contains("rectangle")) return "rtrect";
+            if (h.Contains("redtail") && h.Contains("frvp") && h.Contains("fib")) return "rtfrvpfib";
+            if (h.Contains("redtail") && h.Contains("mtf") && h.Contains("fib")) return "rtmtffib";
             if (h.Contains("redtail") && h.Contains("fib")) return "rtfib";
             if (h.Contains("redtail") && h.Contains("hline")) return "rthline";
             if (h.Contains("redtail") && h.Contains("measure")) return "rtmeasure";
-            if (h.Contains("redtail") && h.Contains("vp") || h.Contains("redtail") && h.Contains("zone")) return "rtzone";
+            if (h.Contains("redtail") && (h.Contains("vp") || h.Contains("zone"))) return "rtzone";
+            if (h.Contains("redtail") && h.Contains("trend") && h.Contains("channel")) return "rttrendchannel";
+            if (h.Contains("redtail") && h.Contains("avwap")) return "rtavwap";
             if (h.Contains("redtail")) return "rtgeneric";
 
             // Gann
@@ -1225,57 +1317,95 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
                 // === REDTAIL CUSTOM ===
                 case "rtfib":
-                    // Fib retracement icon - diagonal line with horizontal levels
-                    c.Children.Add(Ln(m,sz*0.8,sz-m,sz*0.15,color,1.5));
-                    for(int i=0;i<4;i++){double fy=sz*0.2+i*(sz*0.6/3.0);
-                        var fl=Ln(m,fy,sz-m,fy,color,i==0||i==3?1.2:0.8);
-                        if(i==1||i==2)fl.Opacity=0.5;c.Children.Add(fl);}
+                    // Standard fib retracement - horizontal levels with diagonal anchor line
+                    c.Children.Add(Ln(m, sz-m, sz-m, m, color, 1));
+                    for(int i=0;i<5;i++){double y=m+(h/4.0)*i;
+                        var fl=Ln(m,y,sz-m,y,color,1);
+                        fl.Opacity=(i==0||i==4)?1:0.5;c.Children.Add(fl);}
+                    break;
+                case "rtfrvpfib":
+                    // FRVP Fib - fib levels with small volume bars on the left side
+                    for(int i=0;i<5;i++){double y=m+(h/4.0)*i;
+                        c.Children.Add(Ln(sz*0.35,y,sz-m,y,color,1));}
+                    // Mini volume bars along left
+                    double[] frvpVols = {0.4,0.7,1.0,0.6,0.3};
+                    for(int i=0;i<frvpVols.Length;i++){double y=m+(h/4.0)*i;
+                        var vb=Ln(m,y,m+frvpVols[i]*(sz*0.3),y,FB(0,200,120),1);c.Children.Add(vb);}
+                    break;
+                case "rtmtffib":
+                    // MTF Fib - stacked fib levels at different scales to show multi-timeframe
+                    // Outer (higher TF) levels - full width, solid
+                    c.Children.Add(Ln(m,m,sz-m,m,color,1));
+                    c.Children.Add(Ln(m,sz-m,sz-m,sz-m,color,1));
+                    // Inner (lower TF) levels - indented, dashed
+                    for(int i=1;i<4;i++){double y=m+(h/4.0)*i;
+                        var fl=Ln(m+3,y,sz-m-3,y,color,1);
+                        fl.StrokeDashArray=new DoubleCollection{2,2};fl.Opacity=0.6;c.Children.Add(fl);}
+                    // Diagonal connecting line
+                    var mtfDiag=Ln(m,sz-m,sz-m,m,color,1);mtfDiag.Opacity=0.35;c.Children.Add(mtfDiag);
                     break;
                 case "rtrect":
-                    // Rectangle with dashed midline
-                    var rr=new WpfRectangle{Width=w-2*m,Height=h*0.7,Stroke=color,StrokeThickness=1.5,Fill=Brushes.Transparent};
-                    Canvas.SetLeft(rr,m);Canvas.SetTop(rr,m+h*0.15);c.Children.Add(rr);
-                    var ml=Ln(m,sz/2,sz-m,sz/2,color,1.2);
-                    ml.StrokeDashArray=new DoubleCollection{3,2};c.Children.Add(ml);
+                    // Rectangle with dashed midline (zone box)
+                    var rr=new WpfRectangle{Width=w,Height=h*0.65,Stroke=color,StrokeThickness=1,Fill=FB(30,255,120,50)};
+                    Canvas.SetLeft(rr,m);Canvas.SetTop(rr,m+h*0.18);c.Children.Add(rr);
+                    var ml2=Ln(m,sz/2,sz-m,sz/2,color,1);
+                    ml2.StrokeDashArray=new DoubleCollection{3,2};c.Children.Add(ml2);
                     break;
                 case "rthline":
-                    // Horizontal line with end arrows
-                    c.Children.Add(Ln(m,sz/2,sz-m,sz/2,color,2));
-                    // Left arrow cap
-                    c.Children.Add(Ln(m,sz/2,m+sz*0.15,sz*0.35,color,1.2));
-                    c.Children.Add(Ln(m,sz/2,m+sz*0.15,sz*0.65,color,1.2));
-                    // Small tick marks
-                    c.Children.Add(Ln(sz*0.4,sz*0.4,sz*0.4,sz*0.6,color,0.8));
-                    c.Children.Add(Ln(sz*0.6,sz*0.4,sz*0.6,sz*0.6,color,0.8));
+                    // Horizontal line with small price tag on right
+                    c.Children.Add(Ln(m,sz/2,sz-m-4,sz/2,color,1));
+                    // Price label box
+                    var plr=new WpfRectangle{Width=5,Height=5,Fill=color,Stroke=color,StrokeThickness=0.5};
+                    Canvas.SetLeft(plr,sz-m-4);Canvas.SetTop(plr,sz/2-2.5);c.Children.Add(plr);
                     break;
                 case "rtmeasure":
-                    // Ruler/measure icon - diagonal with end caps and dimension arrow
-                    c.Children.Add(Ln(m,sz*0.7,sz-m,sz*0.3,color,1.5));
-                    // End caps (perpendicular ticks)
-                    c.Children.Add(Ln(m-1,sz*0.6,m+sz*0.1,sz*0.8,color,1.2));
-                    c.Children.Add(Ln(sz-m-sz*0.1,sz*0.2,sz-m+1,sz*0.4,color,1.2));
-                    // Small ruler ticks along the line
-                    c.Children.Add(Ln(sz*0.33,sz*0.45,sz*0.38,sz*0.55,color,0.8));
-                    c.Children.Add(Ln(sz*0.5,sz*0.4,sz*0.55,sz*0.55,color,1));
-                    c.Children.Add(Ln(sz*0.66,sz*0.35,sz*0.71,sz*0.45,color,0.8));
+                    // Ruler/measure: diagonal line with horizontal + vertical projection lines
+                    c.Children.Add(Ln(m,sz-m,sz-m,m,color,1));
+                    // Horizontal projection (dashed)
+                    var mh=Ln(m,sz-m,sz-m,sz-m,color,1);mh.StrokeDashArray=new DoubleCollection{2,2};mh.Opacity=0.5;c.Children.Add(mh);
+                    // Vertical projection (dashed)
+                    var mv=Ln(sz-m,m,sz-m,sz-m,color,1);mv.StrokeDashArray=new DoubleCollection{2,2};mv.Opacity=0.5;c.Children.Add(mv);
+                    // End dots
+                    var md1=new WpfEllipse{Width=3,Height=3,Fill=color};
+                    Canvas.SetLeft(md1,m-1.5);Canvas.SetTop(md1,sz-m-1.5);c.Children.Add(md1);
+                    var md2=new WpfEllipse{Width=3,Height=3,Fill=color};
+                    Canvas.SetLeft(md2,sz-m-1.5);Canvas.SetTop(md2,m-1.5);c.Children.Add(md2);
                     break;
                 case "rtzone":
-                    // Supply/demand zone icon - shaded zone with price bouncing off it
-                    var rtz=new WpfRectangle{Width=w-2*m,Height=h*0.3,Stroke=color,StrokeThickness=1,Fill=FB(50,255,120,50)};
-                    Canvas.SetLeft(rtz,m);Canvas.SetTop(rtz,m+h*0.35);c.Children.Add(rtz);
-                    // Price action approaching and bouncing off zone
-                    c.Children.Add(Ln(m,sz*0.2,sz*0.35,sz*0.35,color,1.3));
-                    c.Children.Add(Ln(sz*0.35,sz*0.35,sz*0.55,sz*0.15,color,1.3));
-                    c.Children.Add(Ln(sz*0.55,sz*0.15,sz*0.75,sz*0.35,color,1.3));
-                    c.Children.Add(Ln(sz*0.75,sz*0.35,sz-m,sz*0.2,color,1.3));
+                    // Supply/demand zone - filled zone band with upper/lower boundaries
+                    var rtz=new WpfRectangle{Width=w,Height=h*0.35,Stroke=color,StrokeThickness=1,Fill=FB(50,255,120,50)};
+                    Canvas.SetLeft(rtz,m);Canvas.SetTop(rtz,m+h*0.3);c.Children.Add(rtz);
+                    // Price action wick poking through zone
+                    c.Children.Add(Ln(sz*0.6,m,sz*0.6,sz-m,color,1));
+                    break;
+                case "rttrendchannel":
+                    // Parallel channel - two angled lines with fill between
+                    c.Children.Add(Ln(m,sz*0.75,sz-m,sz*0.35,color,1));
+                    c.Children.Add(Ln(m,sz*0.45,sz-m,m,color,1));
+                    // Dashed midline
+                    var tcMid=Ln(m,sz*0.6,sz-m,sz*0.175,color,1);
+                    tcMid.StrokeDashArray=new DoubleCollection{2,2};tcMid.Opacity=0.4;c.Children.Add(tcMid);
+                    break;
+                case "rtavwap":
+                    // Anchored VWAP - anchor dot with curved VWAP line + bands
+                    // Anchor point
+                    var anch=new WpfEllipse{Width=4,Height=4,Fill=DangerBrush};
+                    Canvas.SetLeft(anch,m-1);Canvas.SetTop(anch,sz*0.65-2);c.Children.Add(anch);
+                    // VWAP line curving from anchor
+                    c.Children.Add(Ln(m+2,sz*0.65,sz*0.35,sz*0.5,color,1));
+                    c.Children.Add(Ln(sz*0.35,sz*0.5,sz*0.65,sz*0.45,color,1));
+                    c.Children.Add(Ln(sz*0.65,sz*0.45,sz-m,sz*0.4,color,1));
+                    // Upper band (dashed)
+                    var avub=Ln(m+2,sz*0.45,sz-m,sz*0.25,color,1);avub.StrokeDashArray=new DoubleCollection{2,2};avub.Opacity=0.5;c.Children.Add(avub);
+                    // Lower band (dashed)
+                    var avlb=Ln(m+2,sz*0.85,sz-m,sz*0.55,color,1);avlb.StrokeDashArray=new DoubleCollection{2,2};avlb.Opacity=0.5;c.Children.Add(avlb);
                     break;
                 case "rtgeneric":
-                    // Generic RT tool - crosshair/target icon
-                    c.Children.Add(Ln(sz/2,m,sz/2,sz-m,color,1.2));
-                    c.Children.Add(Ln(m,sz/2,sz-m,sz/2,color,1.2));
-                    var circle=new System.Windows.Shapes.Ellipse{Width=sz*0.45,Height=sz*0.45,
-                        Stroke=color,StrokeThickness=1.5,Fill=Brushes.Transparent};
-                    Canvas.SetLeft(circle,sz*0.275);Canvas.SetTop(circle,sz*0.275);c.Children.Add(circle);
+                    // Generic RT tool - small RedTail hawk silhouette (simple V shape for wings)
+                    c.Children.Add(Ln(m,m+2,sz/2,sz*0.4,color,1));
+                    c.Children.Add(Ln(sz/2,sz*0.4,sz-m,m+2,color,1));
+                    // Tail
+                    c.Children.Add(Ln(sz/2,sz*0.4,sz/2,sz-m,DangerBrush,1));
                     break;
 
                 // === DEFAULT: First 2 letters ===
@@ -2145,6 +2275,1280 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
         #endregion
 
+        #region Command Center
+
+        private Canvas MakeCommandCenterIcon(double sz)
+        {
+            var c = new Canvas { Width = sz, Height = sz };
+            double m = 1.5;
+            Brush color = DangerBrush;
+
+            // Dashboard / control panel icon - grid of sliders
+            // Top slider
+            c.Children.Add(Ln(m, sz * 0.2, sz - m, sz * 0.2, FB(100, 100, 100), 1.5));
+            var dot1 = new WpfEllipse { Width = 4, Height = 4, Fill = color };
+            Canvas.SetLeft(dot1, sz * 0.65 - 2); Canvas.SetTop(dot1, sz * 0.2 - 2); c.Children.Add(dot1);
+
+            // Middle slider
+            c.Children.Add(Ln(m, sz * 0.5, sz - m, sz * 0.5, FB(100, 100, 100), 1.5));
+            var dot2 = new WpfEllipse { Width = 4, Height = 4, Fill = color };
+            Canvas.SetLeft(dot2, sz * 0.35 - 2); Canvas.SetTop(dot2, sz * 0.5 - 2); c.Children.Add(dot2);
+
+            // Bottom slider
+            c.Children.Add(Ln(m, sz * 0.8, sz - m, sz * 0.8, FB(100, 100, 100), 1.5));
+            var dot3 = new WpfEllipse { Width = 4, Height = 4, Fill = color };
+            Canvas.SetLeft(dot3, sz * 0.5 - 2); Canvas.SetTop(dot3, sz * 0.8 - 2); c.Children.Add(dot3);
+
+            return c;
+        }
+
+        private void ShowCommandCenter_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // Gather all RedTail indicators on the chart
+                var allIndicators = GetChartIndicators();
+                var redtailIndicators = allIndicators
+                    .Where(ind => ind.Name != null && ind.Name.IndexOf("RedTail", StringComparison.OrdinalIgnoreCase) >= 0
+                        && ind != this)
+                    .OrderBy(ind => ind.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (redtailIndicators.Count == 0)
+                {
+                    MessageBox.Show("No RedTail indicators found on this chart.\n\nAdd a RedTail indicator to the chart first,\nthen use the Command Center to configure it.",
+                        "RedTail Command Center", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                // Build the window
+                var ccWindow = new Window
+                {
+                    Title = "RedTail Command Center",
+                    Width = 520,
+                    Height = 640,
+                    MinWidth = 420,
+                    MinHeight = 400,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    Background = FB(28, 28, 28),
+                    ResizeMode = ResizeMode.CanResize,
+                };
+
+                var mainGrid = new Grid();
+                mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44, GridUnitType.Pixel) });   // selector row
+                mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });     // property area
+                mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(48, GridUnitType.Pixel) });   // buttons
+
+                // ======== ROW 0: Indicator selector ========
+                var selectorPanel = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(12, 6, 12, 4)
+                };
+
+                selectorPanel.Children.Add(new TextBlock
+                {
+                    Text = "Indicator:", FontSize = 12, FontWeight = FontWeights.SemiBold,
+                    Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 8, 0)
+                });
+
+                var indCombo = new ComboBox
+                {
+                    Width = 320, Height = 26, FontSize = 11,
+                    Background = FB(45, 45, 45), Foreground = Brushes.White,
+                    VerticalContentAlignment = VerticalAlignment.Center,
+                };
+
+                foreach (var ind in redtailIndicators)
+                {
+                    string display = ind.Name;
+                    try
+                    {
+                        string full = ind.ToString();
+                        if (!string.IsNullOrEmpty(full) && full != ind.Name)
+                            display = full;
+                    }
+                    catch { }
+
+                    indCombo.Items.Add(new ComboBoxItem
+                    {
+                        Content = display,
+                        Tag = ind,
+                        Foreground = Brushes.White,
+                    });
+                }
+
+                selectorPanel.Children.Add(indCombo);
+                Grid.SetRow(selectorPanel, 0);
+                mainGrid.Children.Add(selectorPanel);
+
+                // ======== ROW 1: Property area (populated on selection) ========
+                var propertyScroll = new ScrollViewer
+                {
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Margin = new Thickness(12, 4, 12, 4)
+                };
+
+                var propertyStack = new StackPanel();
+                propertyStack.Children.Add(new TextBlock
+                {
+                    Text = "← Select a RedTail indicator to configure",
+                    Foreground = FB(120, 120, 120), FontStyle = FontStyles.Italic,
+                    FontSize = 12, Margin = new Thickness(0, 20, 0, 0),
+                    HorizontalAlignment = HorizontalAlignment.Center
+                });
+                propertyScroll.Content = propertyStack;
+                Grid.SetRow(propertyScroll, 1);
+                mainGrid.Children.Add(propertyScroll);
+
+                // Track current property controls for Apply
+                var currentPropertyControls = new Dictionary<PropertyInfo, Func<object>>();
+                NinjaTrader.NinjaScript.IndicatorBase currentIndicator = null;
+
+                // ======== ROW 2: Action buttons ========
+                var btnPanel = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 12, 0)
+                };
+
+                var applyBtn = MakeCCButton("Apply", FB(0, 150, 80), true);
+                var cancelBtn = MakeCCButton("Cancel", FB(120, 120, 120), false);
+
+                applyBtn.Click += (s, ev) =>
+                {
+                    if (currentIndicator == null) return;
+
+                    try
+                    {
+                        int applied = 0;
+                        var errors = new List<string>();
+
+                        foreach (var kvp in currentPropertyControls)
+                        {
+                            try
+                            {
+                                var prop = kvp.Key;
+                                var getValue = kvp.Value;
+                                object newVal = getValue();
+                                if (newVal == null) continue;
+
+                                object oldVal = null;
+                                try { oldVal = prop.GetValue(currentIndicator); } catch { }
+
+                                // Check if actually changed
+                                bool same = false;
+                                if (oldVal != null)
+                                {
+                                    if (oldVal is SolidColorBrush oldBrush && newVal is SolidColorBrush newBrush)
+                                        same = oldBrush.Color == newBrush.Color;
+                                    else
+                                        same = oldVal.Equals(newVal);
+                                }
+                                if (same) continue;
+
+                                // For Brush properties, handle frozen brushes
+                                if (prop.PropertyType == typeof(Brush) || prop.PropertyType == typeof(SolidColorBrush))
+                                {
+                                    if (newVal is SolidColorBrush scb)
+                                    {
+                                        // SerializableColor approach — many NT indicators use a backing
+                                        // Serialize property like "NYVWAPColorSerialize" for "NYVWAPColor"
+                                        // Try the direct set first, then try the serializable backing
+                                        try
+                                        {
+                                            var freshBrush = new SolidColorBrush(scb.Color);
+                                            freshBrush.Freeze();
+                                            prop.SetValue(currentIndicator, freshBrush);
+                                            applied++;
+                                            continue;
+                                        }
+                                        catch
+                                        {
+                                            // Try the Serialize backing property
+                                            var serProp = currentIndicator.GetType().GetProperty(prop.Name + "Serialize",
+                                                BindingFlags.Public | BindingFlags.Instance);
+                                            if (serProp != null && serProp.PropertyType == typeof(string))
+                                            {
+                                                string colorStr = string.Format("#{0:X2}{1:X2}{2:X2}{3:X2}",
+                                                    scb.Color.A, scb.Color.R, scb.Color.G, scb.Color.B);
+                                                serProp.SetValue(currentIndicator, colorStr);
+                                                applied++;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                prop.SetValue(currentIndicator, newVal);
+                                applied++;
+                            }
+                            catch (Exception ex)
+                            {
+                                errors.Add(kvp.Key.Name + ": " + ex.Message);
+                                Print("RT CC: Error setting " + kvp.Key.Name + ": " + ex.Message);
+                            }
+                        }
+
+                        if (applied > 0)
+                        {
+                            Print("RT CC: Applied " + applied + " property changes to " + currentIndicator.Name);
+
+                            // Force full chart re-render via F5
+                            ChartControl?.InvalidateVisual();
+                            ForceChartRerender();
+
+                            // Close the window after applying
+                            ccWindow.Close();
+                        }
+
+                        if (errors.Count > 0 && applied == 0)
+                        {
+                            MessageBox.Show("Some properties could not be changed at runtime:\n\n" +
+                                string.Join("\n", errors.Take(5)) +
+                                (errors.Count > 5 ? "\n...and " + (errors.Count - 5) + " more" : "") +
+                                "\n\nThese properties may require removing and re-adding\nthe indicator through NinjaTrader's Indicators dialog.",
+                                "RedTail Command Center", MessageBoxButton.OK, MessageBoxImage.Information);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Print("RT CC Apply Error: " + ex.Message + "\n" + ex.StackTrace);
+                        MessageBox.Show("Error: " + ex.Message, "RedTail Command Center",
+                            MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                };
+
+                cancelBtn.Click += (s, ev) => ccWindow.Close();
+
+                btnPanel.Children.Add(applyBtn);
+                btnPanel.Children.Add(cancelBtn);
+                Grid.SetRow(btnPanel, 2);
+                mainGrid.Children.Add(btnPanel);
+
+                // ======== Combo selection changed → populate properties ========
+                indCombo.SelectionChanged += (s, ev) =>
+                {
+                    propertyStack.Children.Clear();
+                    currentPropertyControls.Clear();
+                    currentIndicator = null;
+
+                    var selected = indCombo.SelectedItem as ComboBoxItem;
+                    if (selected == null) return;
+                    var ind = selected.Tag as NinjaTrader.NinjaScript.IndicatorBase;
+                    if (ind == null) return;
+                    currentIndicator = ind;
+
+                    BuildPropertyPanel(ind, propertyStack, currentPropertyControls);
+                };
+
+                // Auto-select first if only one
+                if (indCombo.Items.Count == 1)
+                    indCombo.SelectedIndex = 0;
+
+                ccWindow.Content = mainGrid;
+                ccWindow.Show();
+            }
+            catch (Exception ex) { Print("RT CC Error: " + ex.Message + "\n" + ex.StackTrace); }
+        }
+
+        private Button MakeCCButton(string content, Brush bgColor, bool isPrimary)
+        {
+            var btn = new Button
+            {
+                Content = content,
+                Width = isPrimary ? 90 : 80, Height = 28,
+                Margin = new Thickness(0, 0, 8, 0),
+                FontSize = 11, FontWeight = isPrimary ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = Brushes.White, Background = bgColor,
+                BorderBrush = FB(80, 80, 80), BorderThickness = new Thickness(1),
+                Cursor = Cursors.Hand, Padding = new Thickness(6, 2, 6, 2),
+            };
+            var origBg = bgColor;
+            btn.MouseEnter += (s, e) => btn.Opacity = 0.85;
+            btn.MouseLeave += (s, e) => btn.Opacity = 1.0;
+            return btn;
+        }
+
+        private static string SafeDisplayName(DisplayAttribute d, string fallback)
+        { try { return d?.GetName() ?? fallback; } catch { return fallback; } }
+
+        private static string SafeDisplayGroupName(DisplayAttribute d, string fallback)
+        { try { return d?.GetGroupName() ?? fallback; } catch { return fallback; } }
+
+        private static string SafeDisplayDescription(DisplayAttribute d, string fallback)
+        { try { return d?.GetDescription() ?? fallback; } catch { return fallback; } }
+
+        private ControlTemplate BuildColorSwatchTemplate()
+        {
+            // ControlTemplate that renders the ToggleButton as a simple rounded rectangle
+            // filled with the Background brush, so it looks like a color swatch
+            var template = new ControlTemplate(typeof(System.Windows.Controls.Primitives.ToggleButton));
+            var borderFactory = new FrameworkElementFactory(typeof(Border));
+            borderFactory.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding("Background")
+                { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
+            borderFactory.SetBinding(Border.BorderBrushProperty, new System.Windows.Data.Binding("BorderBrush")
+                { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
+            borderFactory.SetBinding(Border.BorderThicknessProperty, new System.Windows.Data.Binding("BorderThickness")
+                { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
+            borderFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+            template.VisualTree = borderFactory;
+            return template;
+        }
+
+        private void BuildPropertyPanel(NinjaTrader.NinjaScript.IndicatorBase ind, StackPanel stack,
+            Dictionary<PropertyInfo, Func<object>> controls)
+        {
+            try
+            {
+                // Get all public instance properties with [Display] attribute
+                var props = ind.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(p => p.CanRead && p.CanWrite)
+                    .Where(p => p.GetCustomAttribute<DisplayAttribute>() != null)
+                    .OrderBy(p =>
+                    {
+                        var d = p.GetCustomAttribute<DisplayAttribute>();
+                        try { return d?.GetGroupName() ?? "ZZZ"; } catch { return "ZZZ"; }
+                    })
+                    .ThenBy(p =>
+                    {
+                        var d = p.GetCustomAttribute<DisplayAttribute>();
+                        try { return d?.GetOrder() ?? 999; } catch { return 999; }
+                    })
+                    .ToList();
+
+                if (props.Count == 0)
+                {
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "No configurable properties found for this indicator.",
+                        Foreground = FB(160, 160, 160), FontStyle = FontStyles.Italic,
+                        FontSize = 12, Margin = new Thickness(0, 10, 0, 0)
+                    });
+                    return;
+                }
+
+                // ======== Quick Toggles section (bool properties) ========
+                var boolProps = props.Where(p => p.PropertyType == typeof(bool)).ToList();
+                if (boolProps.Count > 0)
+                {
+                    stack.Children.Add(MakeSectionHeader("Quick Toggles", DangerBrush));
+
+                    var toggleGrid = new System.Windows.Controls.WrapPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Margin = new Thickness(4, 2, 4, 8)
+                    };
+
+                    foreach (var prop in boolProps)
+                    {
+                        var display = prop.GetCustomAttribute<DisplayAttribute>();
+                        string label = SafeDisplayName(display, prop.Name);
+                        bool currentVal = (bool)prop.GetValue(ind);
+
+                        var toggleBtn = new System.Windows.Controls.Primitives.ToggleButton
+                        {
+                            Content = label,
+                            IsChecked = currentVal,
+                            MinWidth = 90, Height = 26,
+                            FontSize = 10.5,
+                            Margin = new Thickness(2, 2, 2, 2),
+                            Padding = new Thickness(8, 2, 8, 2),
+                            Foreground = Brushes.White,
+                            Background = currentVal ? FB(0, 130, 70) : FB(60, 60, 60),
+                            BorderBrush = currentVal ? FB(0, 170, 90) : FB(90, 90, 90),
+                            BorderThickness = new Thickness(1),
+                            Cursor = Cursors.Hand,
+                            ToolTip = SafeDisplayDescription(display, label),
+                        };
+
+                        var capturedToggle = toggleBtn;
+                        toggleBtn.Checked   += (s, e) => { capturedToggle.Background = FB(0, 130, 70); capturedToggle.BorderBrush = FB(0, 170, 90); };
+                        toggleBtn.Unchecked += (s, e) => { capturedToggle.Background = FB(60, 60, 60); capturedToggle.BorderBrush = FB(90, 90, 90); };
+
+                        toggleGrid.Children.Add(toggleBtn);
+                        controls[prop] = () => toggleBtn.IsChecked == true;
+                    }
+
+                    stack.Children.Add(toggleGrid);
+                    stack.Children.Add(MakeThinSep());
+                }
+
+                // ======== Grouped non-bool properties ========
+                var nonBoolProps = props.Where(p => p.PropertyType != typeof(bool)).ToList();
+                string lastGroup = null;
+
+                foreach (var prop in nonBoolProps)
+                {
+                    var display = prop.GetCustomAttribute<DisplayAttribute>();
+                    string group = SafeDisplayGroupName(display, "General");
+                    string label = SafeDisplayName(display, prop.Name);
+                    string desc  = SafeDisplayDescription(display, label);
+
+                    if (group != lastGroup)
+                    {
+                        if (lastGroup != null) stack.Children.Add(MakeThinSep());
+                        stack.Children.Add(MakeSectionHeader(group, FB(100, 180, 255)));
+                        lastGroup = group;
+                    }
+
+                    object currentVal;
+                    try { currentVal = prop.GetValue(ind); }
+                    catch { continue; }
+
+                    var rowGrid = new Grid { Margin = new Thickness(4, 3, 4, 3) };
+                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(180, GridUnitType.Pixel) });
+                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+                    var labelTb = new TextBlock
+                    {
+                        Text = label, FontSize = 11, Foreground = Brushes.White,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        ToolTip = desc ?? label,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                    };
+                    Grid.SetColumn(labelTb, 0);
+                    rowGrid.Children.Add(labelTb);
+
+                    // Create appropriate editor based on property type
+                    FrameworkElement editor = null;
+                    Func<object> getter = null;
+
+                    Type pType = prop.PropertyType;
+
+                    if (pType == typeof(int))
+                    {
+                        var range = prop.GetCustomAttribute<RangeAttribute>();
+                        var tb = MakeCCTextBox(currentVal?.ToString() ?? "0");
+                        editor = tb;
+                        getter = () =>
+                        {
+                            int val;
+                            if (int.TryParse(tb.Text, out val))
+                            {
+                                if (range != null)
+                                {
+                                    if (val < Convert.ToInt32(range.Minimum)) val = Convert.ToInt32(range.Minimum);
+                                    if (val > Convert.ToInt32(range.Maximum)) val = Convert.ToInt32(range.Maximum);
+                                }
+                                return val;
+                            }
+                            return currentVal;
+                        };
+                    }
+                    else if (pType == typeof(double))
+                    {
+                        var range = prop.GetCustomAttribute<RangeAttribute>();
+                        var tb = MakeCCTextBox(currentVal != null ? ((double)currentVal).ToString("G") : "0");
+                        editor = tb;
+                        getter = () =>
+                        {
+                            double val;
+                            if (double.TryParse(tb.Text, out val))
+                            {
+                                if (range != null)
+                                {
+                                    if (val < Convert.ToDouble(range.Minimum)) val = Convert.ToDouble(range.Minimum);
+                                    if (val > Convert.ToDouble(range.Maximum)) val = Convert.ToDouble(range.Maximum);
+                                }
+                                return val;
+                            }
+                            return currentVal;
+                        };
+                    }
+                    else if (pType == typeof(float))
+                    {
+                        var tb = MakeCCTextBox(currentVal != null ? ((float)currentVal).ToString("G") : "0");
+                        editor = tb;
+                        getter = () =>
+                        {
+                            float val;
+                            if (float.TryParse(tb.Text, out val)) return val;
+                            return currentVal;
+                        };
+                    }
+                    else if (pType == typeof(string))
+                    {
+                        var tb = MakeCCTextBox(currentVal?.ToString() ?? "");
+                        editor = tb;
+                        getter = () => tb.Text;
+                    }
+                    else if (pType.IsEnum)
+                    {
+                        var combo = new ComboBox
+                        {
+                            Height = 24, FontSize = 11,
+                            Background = FB(50, 50, 50),
+                            Foreground = Brushes.White,
+                            VerticalContentAlignment = VerticalAlignment.Center,
+                        };
+                        foreach (var enumVal in Enum.GetValues(pType))
+                        {
+                            combo.Items.Add(new ComboBoxItem
+                            {
+                                Content = enumVal.ToString(),
+                                Tag = enumVal,
+                                Foreground = Brushes.White,
+                            });
+                        }
+                        // Select current value
+                        for (int i = 0; i < combo.Items.Count; i++)
+                        {
+                            var item = combo.Items[i] as ComboBoxItem;
+                            if (item?.Tag != null && item.Tag.Equals(currentVal))
+                            {
+                                combo.SelectedIndex = i;
+                                break;
+                            }
+                        }
+                        editor = combo;
+                        getter = () =>
+                        {
+                            var sel = combo.SelectedItem as ComboBoxItem;
+                            return sel?.Tag ?? currentVal;
+                        };
+                    }
+                    else if (pType == typeof(Brush) || pType == typeof(SolidColorBrush))
+                    {
+                        // Color picker - clickable swatch with dropdown palette
+                        Color currentColor = Colors.Gray;
+                        if (currentVal is SolidColorBrush scb) currentColor = scb.Color;
+
+                        var colorPanel = new StackPanel { Orientation = Orientation.Horizontal };
+
+                        // Clickable color swatch (ToggleButton styled as swatch)
+                        var colorToggle = new System.Windows.Controls.Primitives.ToggleButton
+                        {
+                            Width = 32, Height = 22,
+                            Background = new SolidColorBrush(currentColor),
+                            BorderBrush = FB(100, 100, 100), BorderThickness = new Thickness(1),
+                            Margin = new Thickness(0, 0, 6, 0),
+                            Cursor = Cursors.Hand,
+                            Template = BuildColorSwatchTemplate(),
+                        };
+
+                        // Hex text input
+                        var colorText = MakeCCTextBox(string.Format("#{0:X2}{1:X2}{2:X2}", currentColor.R, currentColor.G, currentColor.B));
+                        colorText.Width = 80;
+                        colorText.TextChanged += (s, ev) =>
+                        {
+                            try
+                            {
+                                var c = (Color)ColorConverter.ConvertFromString(colorText.Text);
+                                colorToggle.Background = new SolidColorBrush(c);
+                            }
+                            catch { }
+                        };
+
+                        // Popup palette
+                        var popup = new System.Windows.Controls.Primitives.Popup
+                        {
+                            PlacementTarget = colorToggle,
+                            Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+                            StaysOpen = false,
+                            AllowsTransparency = true,
+                        };
+
+                        // Open/close popup via toggle click events
+                        colorToggle.Checked   += (s, ev) => { popup.IsOpen = true; };
+                        colorToggle.Unchecked += (s, ev) => { popup.IsOpen = false; };
+                        popup.Closed          += (s, ev) => { colorToggle.IsChecked = false; };
+
+                        var paletteBorder = new Border
+                        {
+                            Background = FB(38, 38, 38),
+                            BorderBrush = FB(80, 80, 80), BorderThickness = new Thickness(1),
+                            CornerRadius = new CornerRadius(4),
+                            Padding = new Thickness(8),
+                        };
+
+                        var paletteStack = new StackPanel();
+
+                        // Color palette - trading-friendly colors
+                        string[][] colorRows = new string[][]
+                        {
+                            // Row 1: Core trading colors (greens, reds)
+                            new[] { "#00C853", "#00E676", "#00C896", "#4CAF50", "#2E7D32", "#1B5E20",
+                                    "#FF1744", "#FF5252", "#E53935", "#C62828", "#B71C1C", "#880E4F" },
+                            // Row 2: Blues, cyans, oranges, yellows
+                            new[] { "#2196F3", "#1976D2", "#0D47A1", "#00BCD4", "#0097A7", "#006064",
+                                    "#FF9800", "#F57C00", "#E65100", "#FFEB3B", "#FFC107", "#FF6F00" },
+                            // Row 3: Purples, pinks, teals, limes
+                            new[] { "#9C27B0", "#7B1FA2", "#4A148C", "#E91E63", "#AD1457", "#880E4F",
+                                    "#009688", "#00796B", "#004D40", "#CDDC39", "#9E9D24", "#827717" },
+                            // Row 4: Neutrals & grays
+                            new[] { "#FFFFFF", "#ECEFF1", "#B0BEC5", "#78909C", "#546E7A", "#37474F",
+                                    "#263238", "#212121", "#424242", "#616161", "#9E9E9E", "#BDBDBD" },
+                        };
+
+                        foreach (var row in colorRows)
+                        {
+                            var rowPanel = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 1, 0, 1) };
+                            foreach (var hex in row)
+                            {
+                                Color swatchColor;
+                                try { swatchColor = (Color)ColorConverter.ConvertFromString(hex); }
+                                catch { continue; }
+
+                                var swatch = new Border
+                                {
+                                    Width = 18, Height = 18,
+                                    Background = new SolidColorBrush(swatchColor),
+                                    BorderBrush = FB(70, 70, 70), BorderThickness = new Thickness(0.5),
+                                    CornerRadius = new CornerRadius(2),
+                                    Margin = new Thickness(1),
+                                    Cursor = Cursors.Hand,
+                                    ToolTip = hex,
+                                };
+
+                                string capturedHex = hex;
+                                swatch.MouseLeftButtonDown += (s, ev) =>
+                                {
+                                    colorText.Text = capturedHex;
+                                    try
+                                    {
+                                        var c = (Color)ColorConverter.ConvertFromString(capturedHex);
+                                        colorToggle.Background = new SolidColorBrush(c);
+                                    }
+                                    catch { }
+                                    colorToggle.IsChecked = false;
+                                };
+
+                                // Hover effect
+                                swatch.MouseEnter += (s, ev) => swatch.BorderBrush = Brushes.White;
+                                swatch.MouseLeave += (s, ev) => swatch.BorderBrush = FB(70, 70, 70);
+
+                                rowPanel.Children.Add(swatch);
+                            }
+                            paletteStack.Children.Add(rowPanel);
+                        }
+
+                        paletteBorder.Child = paletteStack;
+                        popup.Child = paletteBorder;
+
+                        colorPanel.Children.Add(colorToggle);
+                        colorPanel.Children.Add(colorText);
+                        editor = colorPanel;
+                        getter = () =>
+                        {
+                            try
+                            {
+                                var c = (Color)ColorConverter.ConvertFromString(colorText.Text);
+                                return new SolidColorBrush(c);
+                            }
+                            catch { return currentVal; }
+                        };
+                    }
+                    else
+                    {
+                        // Unsupported type - show read-only
+                        var ro = new TextBlock
+                        {
+                            Text = currentVal?.ToString() ?? "(null)",
+                            FontSize = 11, Foreground = FB(130, 130, 130),
+                            FontStyle = FontStyles.Italic,
+                            VerticalAlignment = VerticalAlignment.Center,
+                        };
+                        editor = ro;
+                        // No getter for read-only
+                    }
+
+                    if (editor != null)
+                    {
+                        Grid.SetColumn(editor, 1);
+                        rowGrid.Children.Add(editor);
+                        if (getter != null) controls[prop] = getter;
+                    }
+
+                    stack.Children.Add(rowGrid);
+                }
+
+                // ======== Templates section ========
+                stack.Children.Add(MakeThinSep());
+                stack.Children.Add(MakeSectionHeader("Templates", FB(255, 193, 7)));
+
+                BuildTemplateSection(ind, stack);
+            }
+            catch (Exception ex)
+            {
+                stack.Children.Add(new TextBlock
+                {
+                    Text = "Error reading properties: " + ex.Message,
+                    Foreground = DangerBrush, FontSize = 11,
+                    Margin = new Thickness(4, 10, 4, 0), TextWrapping = TextWrapping.Wrap,
+                });
+                Print("RT CC BuildProps Error: " + ex.Message);
+            }
+        }
+
+        private void BuildTemplateSection(NinjaTrader.NinjaScript.IndicatorBase ind, StackPanel stack)
+        {
+            try
+            {
+                // Find template files for this indicator type
+                string indTypeName = ind.GetType().Name;
+                var templateFiles = new List<string>();
+
+                if (Directory.Exists(TemplateDir))
+                {
+                    // NinjaTrader stores templates as TypeName.xml or custom names
+                    foreach (var file in Directory.GetFiles(TemplateDir, "*.xml"))
+                    {
+                        string fileName = Path.GetFileNameWithoutExtension(file);
+                        // Check if the template name starts with the indicator type name
+                        if (fileName.IndexOf(indTypeName, StringComparison.OrdinalIgnoreCase) >= 0
+                            || fileName.IndexOf(ind.Name.Replace(" ", ""), StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            templateFiles.Add(file);
+                        }
+                    }
+                }
+
+                if (templateFiles.Count == 0)
+                {
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "No saved templates found for " + ind.Name + ".\nSave templates via NinjaTrader's indicator properties dialog.",
+                        Foreground = FB(120, 120, 120), FontStyle = FontStyles.Italic,
+                        FontSize = 11, Margin = new Thickness(8, 4, 4, 4),
+                        TextWrapping = TextWrapping.Wrap,
+                    });
+                    return;
+                }
+
+                var templatePanel = new StackPanel { Margin = new Thickness(4, 2, 4, 2) };
+
+                foreach (var tFile in templateFiles)
+                {
+                    string tName = Path.GetFileNameWithoutExtension(tFile);
+                    var tRow = new Grid { Margin = new Thickness(0, 2, 0, 2) };
+                    tRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    tRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70, GridUnitType.Pixel) });
+
+                    var tLabel = new TextBlock
+                    {
+                        Text = tName, FontSize = 11, Foreground = Brushes.White,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        Margin = new Thickness(8, 0, 4, 0),
+                    };
+                    Grid.SetColumn(tLabel, 0);
+                    tRow.Children.Add(tLabel);
+
+                    string capturedFile = tFile;
+                    var loadBtn = new Button
+                    {
+                        Content = "Load",
+                        Width = 60, Height = 22,
+                        FontSize = 10, Foreground = Brushes.White,
+                        Background = FB(60, 120, 180),
+                        BorderBrush = FB(80, 140, 200), BorderThickness = new Thickness(1),
+                        Cursor = Cursors.Hand,
+                    };
+                    loadBtn.Click += (s, ev) =>
+                    {
+                        try
+                        {
+                            // Read the template XML and apply directly to the indicator
+                            var xmlContent = File.ReadAllText(capturedFile);
+                            int applied = ApplyTemplateXmlDirect(ind, xmlContent);
+                            Print("RT CC: Applied template '" + tName + "' (" + applied + " properties) to " + ind.Name);
+
+                            if (applied > 0)
+                            {
+                                ChartControl?.InvalidateVisual();
+                                ForceChartRerender();
+
+                                loadBtn.Content = "✓ Loaded";
+                                loadBtn.Background = FB(0, 130, 70);
+                                var resetT = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+                                resetT.Tick += (s2, e2) =>
+                                {
+                                    loadBtn.Content = "Load";
+                                    loadBtn.Background = FB(60, 120, 180);
+                                    resetT.Stop();
+                                };
+                                resetT.Start();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Print("RT CC: Template load error: " + ex.Message);
+                            MessageBox.Show("Error loading template:\n" + ex.Message, "RedTail Command Center",
+                                MessageBoxButton.OK, MessageBoxImage.Warning);
+                        }
+                    };
+                    Grid.SetColumn(loadBtn, 1);
+                    tRow.Children.Add(loadBtn);
+
+                    templatePanel.Children.Add(tRow);
+                }
+
+                stack.Children.Add(templatePanel);
+            }
+            catch (Exception ex)
+            {
+                Print("RT CC: Template section error: " + ex.Message);
+            }
+        }
+
+        private int ApplyTemplateXmlDirect(NinjaTrader.NinjaScript.IndicatorBase ind, string xmlContent)
+        {
+            int applied = 0;
+            try
+            {
+                var doc = new System.Xml.XmlDocument();
+                doc.LoadXml(xmlContent);
+
+                var props = ind.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(p => p.CanRead && p.CanWrite)
+                    .ToDictionary(p => p.Name, p => p, StringComparer.OrdinalIgnoreCase);
+
+                foreach (System.Xml.XmlNode node in doc.SelectNodes("//*"))
+                {
+                    if (node.ChildNodes.Count == 1 && node.FirstChild is System.Xml.XmlText)
+                    {
+                        string name = node.LocalName;
+                        string value = node.InnerText.Trim();
+
+                        PropertyInfo prop;
+                        if (props.TryGetValue(name, out prop))
+                        {
+                            try
+                            {
+                                object converted = ConvertTemplateValue(prop.PropertyType, value);
+                                if (converted != null)
+                                {
+                                    if (converted is SolidColorBrush scb)
+                                    {
+                                        var fresh = new SolidColorBrush(scb.Color);
+                                        fresh.Freeze();
+                                        converted = fresh;
+                                    }
+                                    prop.SetValue(ind, converted);
+                                    applied++;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Print("RT CC: XML parse error: " + ex.Message); }
+            return applied;
+        }
+
+        private object ConvertTemplateValue(Type targetType, string value)
+        {
+            if (string.IsNullOrEmpty(value)) return null;
+
+            if (targetType == typeof(bool))
+            {
+                bool b;
+                if (bool.TryParse(value, out b)) return b;
+            }
+            else if (targetType == typeof(int))
+            {
+                int i;
+                if (int.TryParse(value, out i)) return i;
+            }
+            else if (targetType == typeof(double))
+            {
+                double d;
+                if (double.TryParse(value, out d)) return d;
+            }
+            else if (targetType == typeof(float))
+            {
+                float f;
+                if (float.TryParse(value, out f)) return f;
+            }
+            else if (targetType == typeof(string))
+            {
+                return value;
+            }
+            else if (targetType.IsEnum)
+            {
+                try { return Enum.Parse(targetType, value, true); }
+                catch { }
+            }
+
+            return null;
+        }
+
+        private TextBox MakeCCTextBox(string text)
+        {
+            return new TextBox
+            {
+                Text = text, FontSize = 11, Height = 24,
+                Background = FB(50, 50, 50), Foreground = Brushes.White,
+                BorderBrush = FB(80, 80, 80), BorderThickness = new Thickness(1),
+                Padding = new Thickness(4, 2, 4, 2),
+                VerticalContentAlignment = VerticalAlignment.Center,
+            };
+        }
+
+        private TextBlock MakeSectionHeader(string text, Brush color)
+        {
+            return new TextBlock
+            {
+                Text = text, FontSize = 12, FontWeight = FontWeights.SemiBold,
+                Foreground = color,
+                Margin = new Thickness(0, 8, 0, 4),
+            };
+        }
+
+        private Border MakeThinSep()
+        {
+            return new Border
+            {
+                Height = 1, Background = FB(60, 60, 60),
+                Margin = new Thickness(0, 6, 0, 2),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+        }
+
+        #endregion
+
+        #region Screenshot
+
+        private Canvas MakeScreenshotIcon(double sz)
+        {
+            var c = new Canvas { Width = sz, Height = sz };
+            double m = 2;
+            Brush color = FB(180, 180, 180);
+
+            // Camera body
+            var body = new WpfRectangle
+            {
+                Width = sz - m * 2, Height = (sz - m * 2) * 0.6,
+                Stroke = color, StrokeThickness = 1, Fill = Brushes.Transparent,
+                RadiusX = 1.5, RadiusY = 1.5
+            };
+            Canvas.SetLeft(body, m); Canvas.SetTop(body, sz * 0.32); c.Children.Add(body);
+
+            // Lens circle
+            var lens = new WpfEllipse
+            {
+                Width = sz * 0.32, Height = sz * 0.32,
+                Stroke = color, StrokeThickness = 1, Fill = Brushes.Transparent
+            };
+            Canvas.SetLeft(lens, sz / 2 - sz * 0.16); Canvas.SetTop(lens, sz * 0.45); c.Children.Add(lens);
+
+            // Viewfinder bump on top
+            c.Children.Add(Ln(sz * 0.32, sz * 0.32, sz * 0.42, sz * 0.18, color, 1));
+            c.Children.Add(Ln(sz * 0.42, sz * 0.18, sz * 0.62, sz * 0.18, color, 1));
+            c.Children.Add(Ln(sz * 0.62, sz * 0.18, sz * 0.68, sz * 0.32, color, 1));
+
+            return c;
+        }
+
+        private void ScreenshotClick(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (chartWindow == null) return;
+
+                // Ensure folder exists
+                string folder = ScreenshotFolder;
+                if (string.IsNullOrWhiteSpace(folder))
+                    folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "RedTail Screenshots");
+                if (!Directory.Exists(folder))
+                    Directory.CreateDirectory(folder);
+
+                // Build filename: instrument_timeframe_timestamp.png
+                string instrument = Instrument?.MasterInstrument?.Name ?? "Chart";
+                string tf = BarsPeriod != null ? BarsPeriod.ToString() : "unknown";
+                // Clean up characters that aren't file-safe
+                tf = tf.Replace(" ", "").Replace(":", "-");
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string fileName = string.Format("{0}_{1}_{2}.png", instrument, tf, timestamp);
+                string filePath = Path.Combine(folder, fileName);
+
+                // Capture via screen BitBlt (gets DX content since it copies actual screen pixels)
+                ChartControl.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    try
+                    {
+                        var hwndSource = PresentationSource.FromVisual(chartWindow) as HwndSource;
+                        if (hwndSource == null) return;
+                        IntPtr hwnd = hwndSource.Handle;
+
+                        RECT rect;
+                        if (!GetWindowRect(hwnd, out rect)) return;
+                        int w = rect.Right - rect.Left;
+                        int h = rect.Bottom - rect.Top;
+                        if (w <= 0 || h <= 0) return;
+
+                        // BitBlt from screen DC to memory DC
+                        IntPtr screenDC = GetDC(IntPtr.Zero);
+                        IntPtr memDC = CreateCompatibleDC(screenDC);
+                        IntPtr hBitmap = CreateCompatibleBitmap(screenDC, w, h);
+                        IntPtr oldBmp = SelectObject(memDC, hBitmap);
+
+                        BitBlt(memDC, 0, 0, w, h, screenDC, rect.Left, rect.Top, SRCCOPY);
+
+                        SelectObject(memDC, oldBmp);
+
+                        // Convert GDI bitmap to WPF BitmapSource and save as PNG
+                        var bmpSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                            hBitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+
+                        var encoder = new PngBitmapEncoder();
+                        encoder.Frames.Add(BitmapFrame.Create(bmpSource));
+                        using (var fs = new FileStream(filePath, FileMode.Create))
+                            encoder.Save(fs);
+
+                        // Cleanup GDI resources
+                        DeleteObject(hBitmap);
+                        DeleteDC(memDC);
+                        ReleaseDC(IntPtr.Zero, screenDC);
+
+                        Print("RT: Screenshot saved → " + filePath);
+
+                        // Flash the button to confirm
+                        screenshotButton.Opacity = 0.4;
+                        var resetT = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+                        resetT.Tick += (s2, e2) => { screenshotButton.Opacity = 1.0; resetT.Stop(); };
+                        resetT.Start();
+                    }
+                    catch (Exception ex) { Print("RT Screenshot Error: " + ex.Message); }
+                }));
+            }
+            catch (Exception ex) { Print("RT Screenshot Error: " + ex.Message); }
+        }
+
+        #endregion
+
+        #region Timeframe Switcher
+
+        private void BuildTimeframeButtons()
+        {
+            if (tfPanel == null) return;
+            tfPanel.Children.Clear();
+
+            string[] parts = (TimeframeList ?? "").Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0) return;
+
+            // Determine current chart timeframe for highlighting
+            BarsPeriodType currentType = BarsPeriodType.Minute;
+            int currentValue = 0;
+            try
+            {
+                if (BarsPeriod != null)
+                {
+                    currentType = BarsPeriod.BarsPeriodType;
+                    currentValue = BarsPeriod.Value;
+                }
+            }
+            catch { }
+
+            foreach (string part in parts)
+            {
+                string trimmed = part.Trim();
+                if (string.IsNullOrEmpty(trimmed)) continue;
+
+                // Parse: pure number = minutes, number + suffix = other types
+                string label;
+                string tooltip;
+                int minutes = 0;
+                BarsPeriodType periodType = BarsPeriodType.Minute;
+                int periodValue = 0;
+
+                string lower = trimmed.ToLower();
+                if (lower.EndsWith("rn"))
+                {
+                    // Renko chart (brick size in ticks)
+                    if (int.TryParse(lower.Substring(0, lower.Length - 2), out periodValue))
+                    {
+                        periodType = BarsPeriodType.Renko;
+                        label = periodValue + "Rn";
+                        tooltip = periodValue + " Renko";
+                    }
+                    else continue;
+                }
+                else if (lower.EndsWith("t"))
+                {
+                    // Tick chart
+                    if (int.TryParse(lower.TrimEnd('t'), out periodValue))
+                    {
+                        periodType = BarsPeriodType.Tick;
+                        label = periodValue + "T";
+                        tooltip = periodValue + " Tick";
+                    }
+                    else continue;
+                }
+                else if (lower.EndsWith("r"))
+                {
+                    // Range chart
+                    if (int.TryParse(lower.TrimEnd('r'), out periodValue))
+                    {
+                        periodType = BarsPeriodType.Range;
+                        label = periodValue + "R";
+                        tooltip = periodValue + " Range";
+                    }
+                    else continue;
+                }
+                else if (lower.EndsWith("s"))
+                {
+                    // Second chart
+                    if (int.TryParse(lower.TrimEnd('s'), out periodValue))
+                    {
+                        periodType = BarsPeriodType.Second;
+                        label = periodValue + "s";
+                        tooltip = periodValue + " Second";
+                    }
+                    else continue;
+                }
+                else if (lower == "d" || lower == "daily")
+                {
+                    periodType = BarsPeriodType.Day;
+                    periodValue = 1;
+                    label = "D";
+                    tooltip = "Daily";
+                }
+                else if (lower == "w" || lower == "weekly")
+                {
+                    periodType = BarsPeriodType.Week;
+                    periodValue = 1;
+                    label = "W";
+                    tooltip = "Weekly";
+                }
+                else
+                {
+                    // Assume minutes
+                    if (!int.TryParse(trimmed, out minutes) || minutes <= 0) continue;
+                    periodType = BarsPeriodType.Minute;
+                    periodValue = minutes;
+                    label = minutes >= 60 ? (minutes / 60) + "H" : minutes + "m";
+                    tooltip = minutes >= 60 ? (minutes / 60) + " Hour" : minutes + " Minute";
+                }
+
+                // Check if this button matches current chart timeframe
+                bool isActive = (periodType == currentType && periodValue == currentValue);
+
+                var capturedType = periodType;
+                var capturedValue = periodValue;
+
+                var btn = new Button
+                {
+                    MinWidth = BtnSize, Height = BtnSize - 6,
+                    Background = isActive ? FB(40, 100, 200, 255) : ButtonBg,
+                    BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand, ToolTip = tooltip,
+                    Margin = new Thickness(1, 0, 1, 0),
+                    Padding = new Thickness(4, 0, 4, 0),
+                    FontSize = 9.5, FontWeight = FontWeights.SemiBold,
+                    Content = label,
+                    Foreground = isActive ? Brushes.White : FB(160, 200, 255),
+                    VerticalContentAlignment = VerticalAlignment.Center,
+                    HorizontalContentAlignment = HorizontalAlignment.Center,
+                    Style = FlatStyle()
+                };
+
+                btn.Click += (s, ev) =>
+                {
+                    SwitchTimeframe(capturedType, capturedValue);
+                    // Highlight the clicked button, dim the rest
+                    foreach (var child in tfPanel.Children)
+                    {
+                        if (child is Button b)
+                        {
+                            b.Background = (b == btn) ? FB(40, 100, 200, 255) : ButtonBg;
+                            b.Foreground = (b == btn) ? Brushes.White : FB(160, 200, 255);
+                        }
+                    }
+                };
+                btn.MouseEnter += (s, ev) => { if (btn.Background != FB(40, 100, 200, 255)) btn.Background = ButtonHoverBg; };
+                btn.MouseLeave += (s, ev) =>
+                {
+                    // Check if this is the active button by foreground color
+                    if (btn.Foreground is SolidColorBrush scb && scb.Color == Colors.White) return;
+                    btn.Background = ButtonBg;
+                };
+
+                tfPanel.Children.Add(btn);
+            }
+        }
+
+        private void SwitchTimeframe(BarsPeriodType periodType, int periodValue)
+        {
+            try
+            {
+                if (chartWindow == null || ChartControl == null) return;
+
+                ChartControl.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+                {
+                    try
+                    {
+                        // Find or use cached IntervalSelector
+                        if (cachedIntervalSelector == null)
+                        {
+                            var allElements = FindVisualChildren<FrameworkElement>(chartWindow);
+                            foreach (var fe in allElements)
+                            {
+                                if (fe.GetType().FullName == "NinjaTrader.Gui.Tools.IntervalSelector"
+                                    && fe.Name == "intervalSelector")
+                                {
+                                    cachedIntervalSelector = fe;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (cachedIntervalSelector == null)
+                        {
+                            Print("RT TF: IntervalSelector not found");
+                            return;
+                        }
+
+                        // Get the Interval property
+                        var intervalProp = cachedIntervalSelector.GetType().GetProperty("Interval",
+                            BindingFlags.Public | BindingFlags.Instance);
+                        if (intervalProp == null)
+                        {
+                            Print("RT TF: Interval property not found");
+                            return;
+                        }
+
+                        // Build the new BarsPeriod
+                        var newPeriod = new NinjaTrader.Data.BarsPeriod
+                        {
+                            BarsPeriodType = periodType,
+                            Value = periodValue,
+                        };
+
+                        // Set the Interval property on the IntervalSelector
+                        intervalProp.SetValue(cachedIntervalSelector, newPeriod);
+
+                        // Try invoking Apply if it exists
+                        var applyMethod = cachedIntervalSelector.GetType().GetMethod("Apply",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (applyMethod != null)
+                            applyMethod.Invoke(cachedIntervalSelector, null);
+
+                        // Simulate Enter key to trigger chart reload
+                        var enterKey = new KeyEventArgs(Keyboard.PrimaryDevice,
+                            PresentationSource.FromVisual(cachedIntervalSelector), 0, Key.Enter)
+                        {
+                            RoutedEvent = Keyboard.KeyDownEvent
+                        };
+                        cachedIntervalSelector.RaiseEvent(enterKey);
+
+                        Print("RT: Switched to " + periodType + " " + periodValue);
+                    }
+                    catch (Exception ex) { Print("RT TF Switch Error: " + ex.Message + "\n" + ex.StackTrace); }
+                }));
+            }
+            catch (Exception ex) { Print("RT TF Switch Error: " + ex.Message); }
+        }
+
+        #endregion
+
         #region Visual Tree Helpers
 
         private void DumpTree(DependencyObject obj, int depth, int maxDepth)
@@ -2236,6 +3640,25 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         [Display(Name="Show Indicator Manager", Description="Button to show/hide chart indicators", Order=11, GroupName="Toolbar Settings")]
         public bool ShowIndicatorManager { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name="Show Command Center", Description="Button to open the RedTail Command Center for live indicator configuration", Order=12, GroupName="Toolbar Settings")]
+        public bool ShowCommandCenter { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name="Show Screenshot Button", Description="One-click chart screenshot saved as PNG", Order=13, GroupName="Toolbar Settings")]
+        public bool ShowScreenshot { get; set; }
+
+        [Display(Name="Screenshot Folder", Description="Folder path where screenshots are saved", Order=14, GroupName="Toolbar Settings")]
+        public string ScreenshotFolder { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name="Show Timeframe Switcher", Description="Quick buttons to switch chart timeframes", Order=15, GroupName="Toolbar Settings")]
+        public bool ShowTimeframeSwitcher { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name="Timeframe List", Description="Comma-separated intervals. Numbers = minutes (60 = 1H), T = tick, R = range, S = second, Rn = renko, D = daily, W = weekly. Examples: 1,5,15,60,386t,4r,30s,4rn,D", Order=16, GroupName="Toolbar Settings")]
+        public string TimeframeList { get; set; }
+
         #endregion
     }
 }
@@ -2247,18 +3670,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
 		private RedTail.RedTailToolbar[] cacheRedTailToolbar;
-		public RedTail.RedTailToolbar RedTailToolbar(int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager)
+		public RedTail.RedTailToolbar RedTailToolbar(int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager, bool showCommandCenter, bool showScreenshot, bool showTimeframeSwitcher, string timeframeList)
 		{
-			return RedTailToolbar(Input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager);
+			return RedTailToolbar(Input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager, showCommandCenter, showScreenshot, showTimeframeSwitcher, timeframeList);
 		}
 
-		public RedTail.RedTailToolbar RedTailToolbar(ISeries<double> input, int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager)
+		public RedTail.RedTailToolbar RedTailToolbar(ISeries<double> input, int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager, bool showCommandCenter, bool showScreenshot, bool showTimeframeSwitcher, string timeframeList)
 		{
 			if (cacheRedTailToolbar != null)
 				for (int idx = 0; idx < cacheRedTailToolbar.Length; idx++)
-					if (cacheRedTailToolbar[idx] != null && cacheRedTailToolbar[idx].ToolbarHeight == toolbarHeight && cacheRedTailToolbar[idx].BtnSize == btnSize && cacheRedTailToolbar[idx].ShowLagTimer == showLagTimer && cacheRedTailToolbar[idx].LagWarningSec == lagWarningSec && cacheRedTailToolbar[idx].LagCriticalSec == lagCriticalSec && cacheRedTailToolbar[idx].ShowATR == showATR && cacheRedTailToolbar[idx].AtrPeriod == atrPeriod && cacheRedTailToolbar[idx].ShowBreakEven == showBreakEven && cacheRedTailToolbar[idx].BreakEvenTicks == breakEvenTicks && cacheRedTailToolbar[idx].ShowPanButton == showPanButton && cacheRedTailToolbar[idx].ShowIndicatorManager == showIndicatorManager && cacheRedTailToolbar[idx].EqualsInput(input))
+					if (cacheRedTailToolbar[idx] != null && cacheRedTailToolbar[idx].ToolbarHeight == toolbarHeight && cacheRedTailToolbar[idx].BtnSize == btnSize && cacheRedTailToolbar[idx].ShowLagTimer == showLagTimer && cacheRedTailToolbar[idx].LagWarningSec == lagWarningSec && cacheRedTailToolbar[idx].LagCriticalSec == lagCriticalSec && cacheRedTailToolbar[idx].ShowATR == showATR && cacheRedTailToolbar[idx].AtrPeriod == atrPeriod && cacheRedTailToolbar[idx].ShowBreakEven == showBreakEven && cacheRedTailToolbar[idx].BreakEvenTicks == breakEvenTicks && cacheRedTailToolbar[idx].ShowPanButton == showPanButton && cacheRedTailToolbar[idx].ShowIndicatorManager == showIndicatorManager && cacheRedTailToolbar[idx].ShowCommandCenter == showCommandCenter && cacheRedTailToolbar[idx].ShowScreenshot == showScreenshot && cacheRedTailToolbar[idx].ShowTimeframeSwitcher == showTimeframeSwitcher && cacheRedTailToolbar[idx].TimeframeList == timeframeList && cacheRedTailToolbar[idx].EqualsInput(input))
 						return cacheRedTailToolbar[idx];
-			return CacheIndicator<RedTail.RedTailToolbar>(new RedTail.RedTailToolbar(){ ToolbarHeight = toolbarHeight, BtnSize = btnSize, ShowLagTimer = showLagTimer, LagWarningSec = lagWarningSec, LagCriticalSec = lagCriticalSec, ShowATR = showATR, AtrPeriod = atrPeriod, ShowBreakEven = showBreakEven, BreakEvenTicks = breakEvenTicks, ShowPanButton = showPanButton, ShowIndicatorManager = showIndicatorManager }, input, ref cacheRedTailToolbar);
+			return CacheIndicator<RedTail.RedTailToolbar>(new RedTail.RedTailToolbar(){ ToolbarHeight = toolbarHeight, BtnSize = btnSize, ShowLagTimer = showLagTimer, LagWarningSec = lagWarningSec, LagCriticalSec = lagCriticalSec, ShowATR = showATR, AtrPeriod = atrPeriod, ShowBreakEven = showBreakEven, BreakEvenTicks = breakEvenTicks, ShowPanButton = showPanButton, ShowIndicatorManager = showIndicatorManager, ShowCommandCenter = showCommandCenter, ShowScreenshot = showScreenshot, ShowTimeframeSwitcher = showTimeframeSwitcher, TimeframeList = timeframeList }, input, ref cacheRedTailToolbar);
 		}
 	}
 }
@@ -2267,14 +3690,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.RedTail.RedTailToolbar RedTailToolbar(int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager)
+		public Indicators.RedTail.RedTailToolbar RedTailToolbar(int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager, bool showCommandCenter, bool showScreenshot, bool showTimeframeSwitcher, string timeframeList)
 		{
-			return indicator.RedTailToolbar(Input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager);
+			return indicator.RedTailToolbar(Input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager, showCommandCenter, showScreenshot, showTimeframeSwitcher, timeframeList);
 		}
 
-		public Indicators.RedTail.RedTailToolbar RedTailToolbar(ISeries<double> input , int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager)
+		public Indicators.RedTail.RedTailToolbar RedTailToolbar(ISeries<double> input , int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager, bool showCommandCenter, bool showScreenshot, bool showTimeframeSwitcher, string timeframeList)
 		{
-			return indicator.RedTailToolbar(input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager);
+			return indicator.RedTailToolbar(input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager, showCommandCenter, showScreenshot, showTimeframeSwitcher, timeframeList);
 		}
 	}
 }
@@ -2283,14 +3706,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.RedTail.RedTailToolbar RedTailToolbar(int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager)
+		public Indicators.RedTail.RedTailToolbar RedTailToolbar(int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager, bool showCommandCenter, bool showScreenshot, bool showTimeframeSwitcher, string timeframeList)
 		{
-			return indicator.RedTailToolbar(Input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager);
+			return indicator.RedTailToolbar(Input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager, showCommandCenter, showScreenshot, showTimeframeSwitcher, timeframeList);
 		}
 
-		public Indicators.RedTail.RedTailToolbar RedTailToolbar(ISeries<double> input , int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager)
+		public Indicators.RedTail.RedTailToolbar RedTailToolbar(ISeries<double> input , int toolbarHeight, int btnSize, bool showLagTimer, double lagWarningSec, double lagCriticalSec, bool showATR, int atrPeriod, bool showBreakEven, int breakEvenTicks, bool showPanButton, bool showIndicatorManager, bool showCommandCenter, bool showScreenshot, bool showTimeframeSwitcher, string timeframeList)
 		{
-			return indicator.RedTailToolbar(input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager);
+			return indicator.RedTailToolbar(input, toolbarHeight, btnSize, showLagTimer, lagWarningSec, lagCriticalSec, showATR, atrPeriod, showBreakEven, breakEvenTicks, showPanButton, showIndicatorManager, showCommandCenter, showScreenshot, showTimeframeSwitcher, timeframeList);
 		}
 	}
 }
