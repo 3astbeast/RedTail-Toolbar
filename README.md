@@ -5,7 +5,7 @@
 <h1 align="center">RedTail Toolbar & Drawing Tools</h1>
 
 <p align="center">
-  <b>A custom chart toolbar and suite of 7 drawing tools for NinjaTrader 8.</b><br>
+  <b>A custom chart toolbar and suite of 8 drawing tools for NinjaTrader 8.</b><br>
   One-click access to drawing tools, chart utilities, and features that NinjaTrader doesn't ship out of the box.
 </p>
 
@@ -19,7 +19,7 @@
 
 ## Overview
 
-RedTail Toolbar installs a persistent toolbar row at the top of your chart with quick-access buttons for NinjaTrader's drawing tools, plus built-in chart utilities like a lag timer, ATR display, break even button, pan mode, indicator visibility manager, command center, screenshot button, timeframe switcher, and drawing management controls. It also includes 7 custom drawing tools that extend NinjaTrader's default toolset with features commonly found in platforms like TradingView.
+RedTail Toolbar installs a persistent toolbar row at the top of your chart with quick-access buttons for NinjaTrader's drawing tools, plus built-in chart utilities like a lag timer, ATR display, break even button, pan mode, indicator visibility manager, command center, screenshot button, timeframe switcher, and drawing management controls. It also includes 8 custom drawing tools that extend NinjaTrader's default toolset with features commonly found in platforms like TradingView.
 
 ---
 
@@ -130,7 +130,7 @@ All toolbar features can be toggled on or off individually:
 
 ## Drawing Tools
 
-The following 7 custom drawing tools are included. Once installed, they appear in NinjaTrader's Drawing Tools menu and can be added to the toolbar like any other tool.
+The following 8 custom drawing tools are included. Once installed, they appear in NinjaTrader's Drawing Tools menu and can be added to the toolbar like any other tool.
 
 ---
 
@@ -185,6 +185,42 @@ A standalone Anchored VWAP drawing tool. Click on any candle to anchor the VWAP 
 - Click to place the anchor, drag to reposition
 - The VWAP recalculates automatically when the anchor is moved or new bars arrive
 - Renders with SharpDX for performance, only drawing visible segments
+
+---
+
+### RedTail Trend Channel
+
+A professional parallel channel drawing tool with a 3-click placement workflow. Click to set the first anchor of the upper line, click again to complete the upper line, then click a third time to set the channel width — the lower line is drawn parallel to the upper automatically.
+
+**Channel Lines**
+- Independent upper and lower line colors, widths, and dash styles
+- Configurable line opacity (1–100%)
+
+**Midline**
+- Optional dashed midline drawn at the center of the channel
+- Independent color, width, and dash style
+
+**Channel Fill**
+- Optional fill between the upper and lower lines
+- Configurable fill color and opacity
+
+**Extensions**
+- Extension modes: None, Right, Left, or Both
+- Extensions project the channel lines beyond the anchor points at the same angle
+- Configurable extension bar count (0 = infinite, extends to edge of chart)
+- Independent extension color, line width, and dash style
+- Fill and midline extend into the extension zones as well
+
+**Price Labels**
+- Optional price labels at the end of the upper, lower, and midline (when midline is enabled)
+- Labels display with a rounded background and auto-flip to the left side when near the chart edge
+- Auto-detects decimal precision from the instrument's tick size
+- Configurable label background color, text color, and font size
+
+**Interaction**
+- After placement, all three anchors are individually draggable via NinjaTrader's native selection handling
+- Anchor handles render as white circles with blue rings when selected
+- Full selection point coverage along upper, lower, and midline for easy click-to-select
 
 ---
 
