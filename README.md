@@ -16,11 +16,11 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/3astbeast/RedTail-Toolbar/refs/heads/main/Screenshot%202026-03-03%20182536.png" width="800" alt="RedTail Toolbar Screenshot"/>
+  <img src="https://raw.githubusercontent.com/3astbeast/RedTail-Toolbar/refs/heads/main/Screenshot%202026-03-03%20182536.png" width="1000" alt="RedTail Toolbar Screenshot"/>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/3astbeast/RedTail-Toolbar/refs/heads/main/Screenshot%202026-03-03%20182909.png" width="400" alt="RedTail Toolbar Screenshot"/>
+  <img src="https://raw.githubusercontent.com/3astbeast/RedTail-Toolbar/refs/heads/main/Screenshot%202026-03-03%20182909.png" width="200" alt="RedTail Toolbar Screenshot"/>
 </p>
 
 ---
