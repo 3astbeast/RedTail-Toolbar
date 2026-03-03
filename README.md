@@ -5,7 +5,7 @@
 <h1 align="center">RedTail Toolbar & Drawing Tools</h1>
 
 <p align="center">
-  <b>A custom chart toolbar and suite of 6 drawing tools for NinjaTrader 8.</b><br>
+  <b>A custom chart toolbar and suite of 7 drawing tools for NinjaTrader 8.</b><br>
   One-click access to drawing tools, chart utilities, and features that NinjaTrader doesn't ship out of the box.
 </p>
 
@@ -19,7 +19,7 @@
 
 ## Overview
 
-RedTail Toolbar installs a persistent toolbar row at the top of your chart with quick-access buttons for NinjaTrader's drawing tools, plus built-in chart utilities like a lag timer, ATR display, break even button, pan mode, indicator visibility manager, and drawing management controls. It also includes 6 custom drawing tools that extend NinjaTrader's default toolset with features commonly found in platforms like TradingView.
+RedTail Toolbar installs a persistent toolbar row at the top of your chart with quick-access buttons for NinjaTrader's drawing tools, plus built-in chart utilities like a lag timer, ATR display, break even button, pan mode, indicator visibility manager, command center, screenshot button, timeframe switcher, and drawing management controls. It also includes 7 custom drawing tools that extend NinjaTrader's default toolset with features commonly found in platforms like TradingView.
 
 ---
 
@@ -43,6 +43,10 @@ One-click buttons that activate any of NinjaTrader's built-in or custom drawing 
 ### Indicator Visibility Manager
 
 A layers-style button that opens a popup listing all indicators currently on the chart. Toggle each indicator on or off individually without removing it from the chart. Visibility state is persisted to a file (`RedTailIndicatorVisibility.txt`) so your hidden indicators stay hidden across sessions and chart reloads. The manager also toggles the visibility of drawing objects created by each indicator.
+
+### Command Center
+
+A live configuration panel for all RedTail indicators on the chart. Click the Command Center button to open a window with a dropdown selector listing every RedTail indicator currently loaded on the chart. Select one to see all of its configurable properties organized by group — booleans, numbers, colors, enums, and text fields are all rendered with appropriate input controls. Adjust any setting and click Apply to push the changes to the indicator in real-time without removing and re-adding it through NinjaTrader's Indicators dialog. Supports brush/color properties with proper frozen brush handling and serializable color backing.
 
 ### Lag Timer
 
@@ -74,6 +78,37 @@ One-click button to move your stop loss to breakeven on the current instrument.
 
 Toggle free chart panning without holding the Ctrl key. When enabled, left-click dragging scrolls the chart instead of drawing. Useful when you want to quickly navigate through history without accidentally placing drawing tools. The button highlights yellow when active. Simulates the Ctrl key via P/Invoke to leverage NinjaTrader's built-in pan behavior.
 
+### Screenshot Button
+
+One-click chart screenshot that captures the full chart window (including DX-rendered content) via screen BitBlt and saves it as a PNG file.
+
+- Files are named automatically: `Instrument_Timeframe_Timestamp.png`
+- Configurable save folder (default: My Pictures / RedTail Screenshots)
+- Button flashes to confirm the screenshot was captured
+- Creates the save folder automatically if it doesn't exist
+
+### Timeframe Switcher
+
+A row of quick-access buttons for switching the chart's timeframe without navigating NinjaTrader's interval menus. The active timeframe is highlighted.
+
+Configure the available timeframes with a comma-separated list in the settings. Plain numbers are interpreted as minutes, and suffixes control the bar type:
+
+| Suffix | Bar Type | Example | Display |
+|:---:|---|---|---|
+| *(none)* | Minute | `5` | 5m |
+| `s` | Second | `30s` | 30s |
+| `t` | Tick | `386t` | 386T |
+| `r` | Range | `4r` | 4R |
+| `rn` | Renko | `4rn` | 4Rn |
+| `d` | Daily | `d` | D |
+| `w` | Weekly | `w` | W |
+
+Minutes ≥ 60 are automatically displayed as hours (e.g., `60` → `1H`, `240` → `4H`).
+
+**Default list:** `1,3,5,15,60`
+
+**Example with mixed types:** `30s,1,3,5,15,60,240,386t,4r,4rn,d,w`
+
 ---
 
 ## Toolbar Settings
@@ -87,12 +122,15 @@ All toolbar features can be toggled on or off individually:
 - **Show Break Even Button** / **Break Even Offset (ticks)** — Enable and configure the BE button (0 = true breakeven)
 - **Show Pan Button** — Enable the pan mode toggle
 - **Show Indicator Manager** — Enable the indicator visibility button
+- **Show Command Center** — Enable the live indicator configuration panel
+- **Show Screenshot Button** / **Screenshot Folder** — Enable screenshots and set the save location
+- **Show Timeframe Switcher** / **Timeframe List** — Enable quick timeframe buttons and configure the available intervals
 
 ---
 
 ## Drawing Tools
 
-The following 6 custom drawing tools are included. Once installed, they appear in NinjaTrader's Drawing Tools menu and can be added to the toolbar like any other tool.
+The following 7 custom drawing tools are included. Once installed, they appear in NinjaTrader's Drawing Tools menu and can be added to the toolbar like any other tool.
 
 ---
 
@@ -123,6 +161,30 @@ Click two anchor points to define a range, and the tool builds a full Fixed Rang
 - Segments volume into 2–10 clusters to find high-volume nodes at different price regions
 - Configurable iterations, rows per cluster, line width, style, and opacity
 - Up to 10 independently colored cluster levels with optional labels and right extension
+
+---
+
+### RedTail AVWAP
+
+A standalone Anchored VWAP drawing tool. Click on any candle to anchor the VWAP from that point forward — the line extends to the right edge of the chart and updates in real-time as new bars form.
+
+**VWAP Line**
+- Configurable color, line width, line style, and opacity
+- VWAP source selection: OHLC4 (default), HLC3, HL2, or Close
+- Optional label at the end of the line showing "AVWAP" and the current value
+- Configurable label font size
+- Diamond-shaped anchor marker at the origin point
+
+**Standard Deviation Bands**
+- 3 independently configurable standard deviation bands
+- Each band has its own: show/hide toggle, multiplier (0.1–10.0), color, opacity, line width, and line style
+- Default multipliers: 1.0, 2.0, 3.0
+- All bands disabled by default
+
+**Interaction**
+- Click to place the anchor, drag to reposition
+- The VWAP recalculates automatically when the anchor is moved or new bars arrive
+- Renders with SharpDX for performance, only drawing visible segments
 
 ---
 
