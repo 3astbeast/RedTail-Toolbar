@@ -1908,6 +1908,30 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             catch (Exception ex) { Print("RT: Error saving indicator visibility: " + ex.Message); }
         }
 
+        /// <summary>Check if an indicator is a RedTail indicator by Name or type name.</summary>
+        private bool IsRedTailIndicator(NinjaTrader.NinjaScript.IndicatorBase ind)
+        {
+            if (ind == null) return false;
+            // Check Name property first
+            if (!string.IsNullOrEmpty(ind.Name) && ind.Name.IndexOf("RedTail", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            // Fallback: check type/namespace (covers cases where Name is empty)
+            string typeName = ind.GetType().FullName;
+            if (!string.IsNullOrEmpty(typeName) && typeName.IndexOf("RedTail", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            // Also check for MACD Volatility which lives in RedTail namespace but doesn't have "RedTail" in the class name
+            return false;
+        }
+
+        /// <summary>Get best display name for an indicator, falling back to type name if Name is empty.</summary>
+        private string GetIndicatorDisplayName(NinjaTrader.NinjaScript.IndicatorBase ind)
+        {
+            // Prefer Name property (clean display name without parameters)
+            if (!string.IsNullOrEmpty(ind.Name)) return ind.Name;
+            // Fallback to type name (strip namespace)
+            return ind.GetType().Name;
+        }
+
         private List<NinjaTrader.NinjaScript.IndicatorBase> GetChartIndicators()
         {
             var indicators = new List<NinjaTrader.NinjaScript.IndicatorBase>();
@@ -1915,7 +1939,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             {
                 if (ChartControl == null) return indicators;
 
-                // Access indicators via ChartControl.Indicators
+                // Primary: ChartControl.Indicators
                 var indCollection = ChartControl.Indicators;
                 if (indCollection != null)
                 {
@@ -1923,6 +1947,24 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     {
                         if (ind == null || ind == this) continue;
                         indicators.Add(ind);
+                    }
+                }
+
+                // Fallback: if ChartControl.Indicators returned nothing, try via ChartPanels
+                if (indicators.Count == 0 && ChartControl.ChartPanels != null)
+                {
+                    foreach (var panel in ChartControl.ChartPanels)
+                    {
+                        if (panel.ChartObjects == null) continue;
+                        foreach (var chartObj in panel.ChartObjects)
+                        {
+                            if (chartObj is NinjaTrader.NinjaScript.IndicatorBase panelInd
+                                && panelInd != this
+                                && !indicators.Contains(panelInd))
+                            {
+                                indicators.Add(panelInd);
+                            }
+                        }
                     }
                 }
             }
@@ -1937,7 +1979,8 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 var indicators = GetChartIndicators();
                 foreach (var ind in indicators)
                 {
-                    if (hiddenIndicators.Contains(ind.Name))
+                    string indKey = !string.IsNullOrEmpty(ind.Name) ? ind.Name : ind.GetType().Name;
+                    if (hiddenIndicators.Contains(indKey))
                         SetIndicatorVisible(ind, false);
                 }
                 if (hiddenIndicators.Count > 0)
@@ -2063,7 +2106,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 }
 
                 // Sort alphabetically
-                indicators.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+                indicators.Sort((a, b) => string.Compare(GetIndicatorDisplayName(a), GetIndicatorDisplayName(b), StringComparison.OrdinalIgnoreCase));
 
                 // Build popup window
                 var managerWindow = new Window
@@ -2124,16 +2167,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 // One row per indicator: checkbox + delete button
                 foreach (var ind in indicators)
                 {
-                    string displayName = ind.Name;
-
-                    // Try to get fuller display name with parameters
-                    try
-                    {
-                        string fullName = ind.ToString();
-                        if (!string.IsNullOrEmpty(fullName) && fullName != ind.Name)
-                            displayName = fullName;
-                    }
-                    catch { }
+                    string displayName = GetIndicatorDisplayName(ind);
 
                     bool isVisible = GetIndicatorIsVisible(ind);
 
@@ -2164,7 +2198,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                         FontSize = 11, FontWeight = FontWeights.Bold,
                         Foreground = DangerBrush, Background = Brushes.Transparent,
                         BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
-                        Cursor = Cursors.Hand, ToolTip = "Remove " + ind.Name + " from chart",
+                        Cursor = Cursors.Hand, ToolTip = "Remove " + GetIndicatorDisplayName(ind) + " from chart",
                         VerticalAlignment = VerticalAlignment.Center,
                         HorizontalAlignment = HorizontalAlignment.Center,
                         Padding = new Thickness(0),
@@ -2187,7 +2221,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                                 stack.Children.Remove(capturedRow);
 
                                 // Remove from hidden set if present
-                                hiddenIndicators.Remove(capturedInd.Name);
+                                hiddenIndicators.Remove(!string.IsNullOrEmpty(capturedInd.Name) ? capturedInd.Name : capturedInd.GetType().Name);
                                 SaveIndicatorVisibility();
 
                                 // Remove indicator from chart via ChartControl
@@ -2246,7 +2280,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                         bool show = kvp.Value.IsChecked == true;
 
                         if (!show)
-                            hiddenIndicators.Add(ind.Name);
+                            hiddenIndicators.Add(!string.IsNullOrEmpty(ind.Name) ? ind.Name : ind.GetType().Name);
 
                         SetIndicatorVisible(ind, show);
                     }
@@ -2306,12 +2340,11 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         {
             try
             {
-                // Gather all RedTail indicators on the chart
+                // Gather all RedTail indicators on the chart (check both Name and type name)
                 var allIndicators = GetChartIndicators();
                 var redtailIndicators = allIndicators
-                    .Where(ind => ind.Name != null && ind.Name.IndexOf("RedTail", StringComparison.OrdinalIgnoreCase) >= 0
-                        && ind != this)
-                    .OrderBy(ind => ind.Name, StringComparer.OrdinalIgnoreCase)
+                    .Where(ind => ind != this && IsRedTailIndicator(ind))
+                    .OrderBy(ind => GetIndicatorDisplayName(ind), StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
                 if (redtailIndicators.Count == 0)
@@ -2363,14 +2396,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
                 foreach (var ind in redtailIndicators)
                 {
-                    string display = ind.Name;
-                    try
-                    {
-                        string full = ind.ToString();
-                        if (!string.IsNullOrEmpty(full) && full != ind.Name)
-                            display = full;
-                    }
-                    catch { }
+                    string display = GetIndicatorDisplayName(ind);
 
                     indCombo.Items.Add(new ComboBoxItem
                     {
