@@ -419,9 +419,59 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
             if (outerGrid == null) { Print("RT: outerGrid not found"); return; }
 
-            // Find inner grid inside MainTabControl
-            Grid innerGrid = FindNamedGrid(chartWindow.MainTabControl, null, 3);
+            // Find inner grid scoped to this chart tab.
+            // Walk up from ChartControl to find 'grdChartTab' — the per-tab grid.
+            // This avoids cross-tab collisions on duplicated charts in the same window.
+            Grid innerGrid = null;
+            DependencyObject walk = ChartControl;
+            while (walk != null)
+            {
+                walk = VisualTreeHelper.GetParent(walk);
+                if (walk is Grid g && g.RowDefinitions.Count > 0)
+                {
+                    innerGrid = g;
+                    break;  // Use the first (closest) grid with rows — this is the per-tab grid
+                }
+            }
+
+            if (innerGrid == null)
+            {
+                // Fallback to original search from MainTabControl
+                innerGrid = FindNamedGrid(chartWindow.MainTabControl, null, 3);
+            }
             if (innerGrid == null) { Print("RT: inner grid not found"); return; }
+
+            // If a toolbar already exists in this grid (e.g. from chart duplication),
+            // replace it in-place — the cloned toolbar's event handlers point to the old instance
+            var existingToolbar = innerGrid.Children.OfType<Grid>()
+                .FirstOrDefault(g => g.Tag is string s && s == "RedTailToolbar");
+            if (existingToolbar != null)
+            {
+                int existingRow = Grid.GetRow(existingToolbar);
+                int existingColSpan = Grid.GetColumnSpan(existingToolbar);
+                innerGrid.Children.Remove(existingToolbar);
+
+                toolbarGrid = BuildToolbar();
+                Grid.SetRow(toolbarGrid, existingRow);
+                Grid.SetColumnSpan(toolbarGrid, existingColSpan);
+                innerGrid.Children.Add(toolbarGrid);
+
+                chartGrid = innerGrid;
+                insertedRow = existingRow;
+                toolbarInstalled = true;
+                Print("RT: Replaced cloned toolbar from duplicated chart");
+
+                if (ShowLagTimer)
+                {
+                    lagTimer = new DispatcherTimer(DispatcherPriority.Render)
+                    {
+                        Interval = TimeSpan.FromMilliseconds(250)
+                    };
+                    lagTimer.Tick += LagTimer_Tick;
+                    lagTimer.Start();
+                }
+                return;
+            }
 
             // Build toolbar
             toolbarGrid = BuildToolbar();
@@ -492,6 +542,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 Height = ToolbarHeight,
                 Background = ToolbarBg,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
+                Tag = "RedTailToolbar",
             };
 
             var border = new Border
