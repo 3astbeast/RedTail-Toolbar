@@ -24,6 +24,7 @@ using NinjaTrader.Gui.Chart;
 using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.Indicators;
+using NinjaTrader.NinjaScript.DrawingTools;
 
 using WpfLine      = System.Windows.Shapes.Line;
 using WpfEllipse   = System.Windows.Shapes.Ellipse;
@@ -32,6 +33,19 @@ using WpfRectangle = System.Windows.Shapes.Rectangle;
 
 namespace NinjaTrader.NinjaScript.Indicators.RedTail
 {
+    public enum TradeReviewLineStyle { Solid, Dash, DashDot }
+
+    /// <summary>
+    /// Global runtime flags shared across the entire RedTail suite. Any RedTail
+    /// indicator can check these before speaking/playing an alert:
+    ///     if (RedTailGlobal.VoiceAlertsMuted) return;
+    /// Session-only — resets to unmuted when NinjaTrader restarts.
+    /// </summary>
+    public static class RedTailGlobal
+    {
+        public static volatile bool VoiceAlertsMuted = false;
+    }
+
     public class RedTailToolbar : Indicator
     {
         #region Private Fields
@@ -58,6 +72,27 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         // Break Even
         private Button                      beButton;
         private static readonly Brush       BeBrush = FB(0, 200, 120);
+
+        // Trade Review
+        private Button                      tradeReviewButton;
+        private bool                        tradeReviewActive = false;
+        private List<ReviewTrade>           reviewTrades      = new List<ReviewTrade>();
+        private System.Windows.Point        tradeReviewMouse  = new System.Windows.Point(-1, -1);
+        private bool                        tradeMouseHooked  = false;
+
+        // Trade Review — cached device resources (FIX: previously brushes, a
+        // StrokeStyle and an entire DirectWrite factory were created and disposed
+        // per trade per frame inside OnRender; with a day of trades on a tick
+        // chart that's heavy churn). Device-dependent brushes are (re)built in
+        // OnRenderTargetChanged; DirectWrite objects are device-independent and
+        // built once lazily, disposed at Terminated.
+        private SharpDX.Direct2D1.SolidColorBrush dxWinFill, dxLossFill;
+        private SharpDX.Direct2D1.SolidColorBrush dxWinBorder, dxLossBorder;
+        private SharpDX.Direct2D1.SolidColorBrush dxWinSolid, dxLossSolid;
+        private SharpDX.Direct2D1.SolidColorBrush dxTooltipBg, dxTooltipText;
+        private SharpDX.Direct2D1.StrokeStyle     dxDashStroke;
+        private SharpDX.DirectWrite.Factory       dwFactory;
+        private SharpDX.DirectWrite.TextFormat    dwTextNorm, dwTextBold;
 
         // Pan Mode
         private Button                      panButton;
@@ -132,16 +167,33 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         private static readonly Brush IcoIndicator = FB(0, 200, 120);
 
         // Indicator Visibility
-        private static readonly string IndSettingsFile = Path.Combine(
-            NinjaTrader.Core.Globals.UserDataDir, "RedTailIndicatorVisibility.txt");
-        private HashSet<string> hiddenIndicators;
+        // FIX: hidden-indicator state is now persisted PER CHART via the serialized
+        // property HiddenIndicatorsSerialized (saved inside the workspace/chart XML).
+        // The old global RedTailIndicatorVisibility.txt leaked hidden names across
+        // every chart and was clobbered last-writer-wins by each toolbar instance.
+        private HashSet<string> hiddenIndicators = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private DispatcherTimer visibilityRetryTimer;
+        private int visibilityRetryCount;
 
         // Command Center
         private static readonly string TemplateDir = Path.Combine(
             NinjaTrader.Core.Globals.UserDataDir, "templates", "Indicator");
 
+        private static readonly string DrawingTemplateDir = Path.Combine(
+            NinjaTrader.Core.Globals.UserDataDir, "templates", "DrawingTool");
+
+        // Drawing Template Picker
+        private Button                      templatePickerButton;
+
         // Screenshot
         private Button                      screenshotButton;
+
+        // Indicator labels toggle / global voice mute
+        private Button                      labelsButton;
+        private TextBlock                   labelsButtonText;
+        private Button                      muteButton;
+        private Dictionary<NinjaTrader.NinjaScript.IndicatorBase, string> savedLabels
+            = new Dictionary<NinjaTrader.NinjaScript.IndicatorBase, string>();
 
         // Timeframe Switcher
         private StackPanel                  tfPanel;
@@ -172,6 +224,15 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 ShowATR                 = true;
                 AtrPeriod               = 14;
                 ShowBreakEven           = true;
+
+                // Trade Review appearance
+                TRWinBrush              = new SolidColorBrush(System.Windows.Media.Colors.LimeGreen);
+                TRLossBrush             = new SolidColorBrush(System.Windows.Media.Colors.Crimson);
+                TRFillOpacity           = 15;
+                TRBorderOpacity         = 80;
+                TRBorderWidth           = 1.0;
+                TRShowLines             = true;
+                TRLineStyle             = TradeReviewLineStyle.Dash;
                 BreakEvenTicks          = 0;
                 ShowPanButton           = true;
                 ShowIndicatorManager    = true;
@@ -180,6 +241,8 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 ScreenshotFolder       = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "RedTail Screenshots");
                 ShowTimeframeSwitcher  = true;
                 TimeframeList          = "1,3,5,15,60";
+                HiddenIndicatorsSerialized = "";
+                HideIndicatorLabels    = false;
             }
             else if (State == State.DataLoaded)
             {
@@ -204,6 +267,11 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             else if (State == State.Terminated)
             {
                 if (lagTimer != null) { lagTimer.Stop(); lagTimer = null; }
+                if (visibilityRetryTimer != null) { visibilityRetryTimer.Stop(); visibilityRetryTimer = null; }
+                // Device-dependent DX brushes are disposed via OnRenderTargetChanged
+                // (NT calls it with RenderTarget == null on teardown); DirectWrite
+                // objects are device-independent so dispose them here.
+                DisposeDirectWrite();
                 // Ensure Ctrl key is released if pan mode was active
                 if (panDragging || panMode)
                 {
@@ -255,7 +323,250 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 lagSec = Math.Min(deltaUtc, deltaLocal);
             }
         }
-        protected override void OnRender(ChartControl cc, ChartScale cs) { }
+        public override void OnRenderTargetChanged()
+        {
+            // Dispose old device-dependent resources; rebuild against the new
+            // RenderTarget if one exists. NT calls this with RenderTarget == null
+            // on teardown, which handles disposal for us.
+            DisposeDxBrushes();
+            if (RenderTarget == null || RenderTarget.IsDisposed) return;
+
+            try
+            {
+                var winC  = BrushToMediaColor(TRWinBrush);
+                var lossC = BrushToMediaColor(TRLossBrush);
+
+                dxWinFill    = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, MediaColorToSharpDX(winC,  TRFillOpacity / 100f));
+                dxLossFill   = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, MediaColorToSharpDX(lossC, TRFillOpacity / 100f));
+                dxWinBorder  = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, MediaColorToSharpDX(winC,  TRBorderOpacity / 100f));
+                dxLossBorder = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, MediaColorToSharpDX(lossC, TRBorderOpacity / 100f));
+                dxWinSolid   = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, MediaColorToSharpDX(winC,  1f));
+                dxLossSolid  = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, MediaColorToSharpDX(lossC, 1f));
+                dxTooltipBg  = new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color4(0.10f, 0.10f, 0.10f, 0.95f));
+                dxTooltipText= new SharpDX.Direct2D1.SolidColorBrush(RenderTarget, new SharpDX.Color4(0.88f, 0.88f, 0.88f, 1f));
+
+                SharpDX.Direct2D1.DashStyle ds = SharpDX.Direct2D1.DashStyle.Dash;
+                if      (TRLineStyle == TradeReviewLineStyle.Solid)   ds = SharpDX.Direct2D1.DashStyle.Solid;
+                else if (TRLineStyle == TradeReviewLineStyle.DashDot) ds = SharpDX.Direct2D1.DashStyle.DashDot;
+                dxDashStroke = new SharpDX.Direct2D1.StrokeStyle(RenderTarget.Factory,
+                    new SharpDX.Direct2D1.StrokeStyleProperties { DashStyle = ds });
+            }
+            catch (Exception ex)
+            {
+                Print("RT: Error creating render resources: " + ex.Message);
+                DisposeDxBrushes();
+            }
+        }
+
+        private void DisposeDxBrushes()
+        {
+            try
+            {
+                if (dxWinFill != null)    { dxWinFill.Dispose();    dxWinFill = null; }
+                if (dxLossFill != null)   { dxLossFill.Dispose();   dxLossFill = null; }
+                if (dxWinBorder != null)  { dxWinBorder.Dispose();  dxWinBorder = null; }
+                if (dxLossBorder != null) { dxLossBorder.Dispose(); dxLossBorder = null; }
+                if (dxWinSolid != null)   { dxWinSolid.Dispose();   dxWinSolid = null; }
+                if (dxLossSolid != null)  { dxLossSolid.Dispose();  dxLossSolid = null; }
+                if (dxTooltipBg != null)  { dxTooltipBg.Dispose();  dxTooltipBg = null; }
+                if (dxTooltipText != null){ dxTooltipText.Dispose();dxTooltipText = null; }
+                if (dxDashStroke != null) { dxDashStroke.Dispose(); dxDashStroke = null; }
+            }
+            catch { }
+        }
+
+        /// <summary>Lazy-create device-independent DirectWrite resources (factory + text formats).</summary>
+        private bool EnsureDirectWrite()
+        {
+            try
+            {
+                if (dwFactory == null)
+                    dwFactory = new SharpDX.DirectWrite.Factory();
+                if (dwTextNorm == null)
+                    dwTextNorm = new SharpDX.DirectWrite.TextFormat(dwFactory, "Consolas", 10f);
+                if (dwTextBold == null)
+                    dwTextBold = new SharpDX.DirectWrite.TextFormat(dwFactory, "Consolas",
+                        null,
+                        SharpDX.DirectWrite.FontWeight.Bold,
+                        SharpDX.DirectWrite.FontStyle.Normal,
+                        SharpDX.DirectWrite.FontStretch.Normal, 10.5f, "en-us");
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private void DisposeDirectWrite()
+        {
+            try
+            {
+                if (dwTextNorm != null) { dwTextNorm.Dispose(); dwTextNorm = null; }
+                if (dwTextBold != null) { dwTextBold.Dispose(); dwTextBold = null; }
+                if (dwFactory != null)  { dwFactory.Dispose();  dwFactory = null; }
+            }
+            catch { }
+        }
+
+        protected override void OnRender(ChartControl cc, ChartScale cs)
+        {
+            if (!tradeReviewActive || reviewTrades.Count == 0) return;
+            if (cc == null || cs == null) return;
+
+            var rt = RenderTarget;
+            if (rt == null || rt.IsDisposed) return;
+
+            // Cached brushes must exist (built in OnRenderTargetChanged)
+            if (dxWinFill == null || dxLossFill == null || dxWinBorder == null || dxLossBorder == null) return;
+
+            var bars = cc.BarsArray != null && cc.BarsArray.Count > 0 ? cc.BarsArray[0] : null;
+            if (bars == null) return;
+
+            // Find all hovered trades (stacked partials can overlap)
+            var hoveredList = new List<ReviewTrade>();
+
+            for (int i = 0; i < reviewTrades.Count; i++)
+            {
+                var t = reviewTrades[i];
+                bool win = t.PnL >= 0;
+
+                // Time → X pixel
+                int entryBarIdx = GetBarIndexForTime(cc, t.EntryTime);
+                int exitBarIdx  = GetBarIndexForTime(cc, t.ExitTime);
+                if (entryBarIdx < 0 || exitBarIdx < 0) continue;
+
+                float xEntry = cc.GetXByBarIndex(bars, entryBarIdx);
+                float xExit  = cc.GetXByBarIndex(bars, exitBarIdx);
+                if (xExit <= xEntry) xExit = xEntry + 4;
+
+                // Price → Y pixel
+                double pHigh = Math.Max(t.EntryPrice, t.ExitPrice);
+                double pLow  = Math.Min(t.EntryPrice, t.ExitPrice);
+                float  yTop  = cs.GetYByValue(pHigh);
+                float  yBot  = cs.GetYByValue(pLow);
+                if (yBot <= yTop) yBot = yTop + 4;
+
+                // Offset stacked partials so they're visually distinct
+                float stackOffset = t.TotalPartials > 1 ? t.PartialIndex * 3f : 0f;
+                float xEntryO = xEntry + stackOffset;
+                float yTopO   = yTop   - stackOffset;
+                float yBotO   = yBot   - stackOffset;
+
+                var boxRect = new SharpDX.RectangleF(xEntryO, yTopO, xExit - xEntry, yBotO - yTopO);
+
+                // Box fill/border from cached device resources (no per-frame allocation)
+                var fillBr   = win ? dxWinFill   : dxLossFill;
+                var borderBr = win ? dxWinBorder : dxLossBorder;
+                float lineW  = (float)TRBorderWidth;
+
+                rt.FillRectangle(boxRect, fillBr);
+                rt.DrawRectangle(boxRect, borderBr, lineW);
+
+                if (TRShowLines && dxDashStroke != null)
+                {
+                    float yEntry = cs.GetYByValue(t.EntryPrice);
+                    float yExit  = cs.GetYByValue(t.ExitPrice);
+
+                    rt.DrawLine(new SharpDX.Vector2(xEntry, yEntry),
+                                new SharpDX.Vector2(xExit,  yEntry), borderBr, lineW, dxDashStroke);
+                    rt.DrawLine(new SharpDX.Vector2(xEntry, yExit),
+                                new SharpDX.Vector2(xExit,  yExit),  borderBr, lineW, dxDashStroke);
+                }
+
+                // Check hover (use offset rect)
+                if (tradeReviewMouse.X >= xEntryO && tradeReviewMouse.X <= xExit  &&
+                    tradeReviewMouse.Y >= yTopO   && tradeReviewMouse.Y <= yBotO)
+                    hoveredList.Add(t);
+            }
+
+            // ── Draw hover tooltip ────────────────────────────────────────────
+            if (hoveredList.Count > 0)
+            {
+                // Use the first hovered trade for header/entry info (all share same group)
+                var t    = hoveredList[0];
+                bool win = t.GroupTotalPnL >= 0;
+                string fmt = "F" + GetPriceDecimals();
+
+                string dir = t.IsLong ? "▲  LONG" : "▼  SHORT";
+                bool multiPartial = t.TotalPartials > 1;
+
+                // Show ALL partials for this group, regardless of which box is hovered
+                var groupTrades = reviewTrades
+                    .Where(r => r.GroupId == t.GroupId)
+                    .OrderBy(r => r.PartialIndex)
+                    .ToList();
+
+                var linesList = new List<string>();
+                string header = dir + "  x" + t.GroupTotalQty.ToString("F0");
+                if (multiPartial) header += "  (" + t.TotalPartials + " TPs)";
+                linesList.Add(header);
+                linesList.Add("Entry  " + t.EntryPrice.ToString(fmt));
+
+                foreach (var h in groupTrades)
+                {
+                    if (multiPartial)
+                        linesList.Add(string.Format("TP{0}   Exit {1}   x{2}   {3}{4:F2}",
+                            h.PartialIndex + 1,
+                            h.ExitPrice.ToString(fmt),
+                            h.Qty.ToString("F0"),
+                            h.PnL >= 0 ? "+" : "", h.PnL));
+                    else
+                        linesList.Add("Exit   " + h.ExitPrice.ToString(fmt));
+                }
+
+                string totalPnl = (t.GroupTotalPnL >= 0 ? "+" : "") + t.GroupTotalPnL.ToString("F2");
+                linesList.Add("Total  " + totalPnl);
+                string[] lines = linesList.ToArray();
+
+                float mx = (float)tradeReviewMouse.X;
+                float my = (float)tradeReviewMouse.Y;
+
+                float lineH   = 18f;
+                float pad     = 10f;
+                float cardW   = multiPartial ? 215f : 165f;
+                float cardH   = pad * 2 + lines.Length * lineH;
+
+                // Position card above cursor with a gap to clear the crosshair line
+                float gap = 18f;
+                float cx  = mx + 14;
+                float cy  = my - cardH - gap;
+                if (cx + cardW > rt.Size.Width) cx = mx - cardW - 8;
+                if (cy < 4)                      cy = my + gap;  // flip below if no room above
+                if (cy + cardH > rt.Size.Height) cy = rt.Size.Height - cardH - 4;
+
+                var cardRect = new SharpDX.RectangleF(cx, cy, cardW, cardH);
+
+                // Card background + border from cached resources
+                var bgBr  = dxTooltipBg;
+                var txtBr = dxTooltipText;
+                var bdBr  = win ? dxWinSolid : dxLossSolid;
+                var accBr = bdBr;  // accent matches border
+                if (bgBr == null || txtBr == null || bdBr == null) return;
+
+                rt.FillRectangle(cardRect, bgBr);
+                rt.DrawRectangle(cardRect, bdBr, 1.2f);
+
+                // Left accent bar
+                rt.FillRectangle(new SharpDX.RectangleF(cx, cy, 3f, cardH), bdBr);
+
+                // Text via cached DirectWrite (factory + formats built once, not per frame)
+                if (EnsureDirectWrite())
+                {
+                    try
+                    {
+                        for (int li = 0; li < lines.Length; li++)
+                        {
+                            var tf  = li == 0 ? dwTextBold : dwTextNorm;
+                            var br  = li == 0 ? (SharpDX.Direct2D1.Brush)accBr : (SharpDX.Direct2D1.Brush)txtBr;
+                            var tr  = new SharpDX.RectangleF(
+                                cx + pad, cy + pad + li * lineH,
+                                cardW - pad * 2, lineH);
+                            using (var tl = new SharpDX.DirectWrite.TextLayout(dwFactory, lines[li], tf, tr.Width, tr.Height))
+                                rt.DrawTextLayout(new SharpDX.Vector2(tr.Left, tr.Top), tl, br);
+                        }
+                    }
+                    catch { /* DirectWrite not critical */ }
+                }
+            }
+        }
 
         #endregion
 
@@ -515,8 +826,18 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             try
             {
                 int row = insertedRow;
-                chartGrid.Children.Remove(toolbarGrid);
-                if (row >= 0 && row < chartGrid.RowDefinitions.Count)
+
+                // FIX: on NinjaScript recompile, the NEW instance's InstallToolbar
+                // can run before the OLD instance's RemoveToolbar. The new install
+                // takes the "replace existing toolbar" path (removing our grid and
+                // reusing its row). If we then blindly RemoveAt(row), we delete the
+                // RowDefinition the new toolbar is sitting in and the layout breaks.
+                // Only collapse the row if OUR toolbar grid was still in the tree.
+                bool wasStillInGrid = chartGrid.Children.Contains(toolbarGrid);
+                if (wasStillInGrid)
+                    chartGrid.Children.Remove(toolbarGrid);
+
+                if (wasStillInGrid && row >= 0 && row < chartGrid.RowDefinitions.Count)
                 {
                     chartGrid.RowDefinitions.RemoveAt(row);
                     foreach (UIElement child in chartGrid.Children)
@@ -526,7 +847,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     }
                 }
                 toolbarGrid = null; chartGrid = null; insertedRow = -1; toolbarInstalled = false;
-                Print("RT: Toolbar removed");
+                Print(wasStillInGrid ? "RT: Toolbar removed" : "RT: Toolbar already replaced — skipped row removal");
             }
             catch (Exception ex) { Print("RT Remove Error: " + ex.Message); }
         }
@@ -598,6 +919,74 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 p.Children.Add(indBtn);
             }
 
+            // Indicator Labels toggle — blanks/restores DisplayName on every
+            // indicator so the parameter text in the chart's top-left disappears
+            {
+                labelsButtonText = new TextBlock
+                {
+                    Text = "Lbl", FontSize = 10, FontWeight = FontWeights.Bold,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                };
+                labelsButton = new Button
+                {
+                    Width = BtnSize + 6, Height = BtnSize - 4, Background = ButtonBg,
+                    BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand,
+                    ToolTip = "Hide/Show indicator labels (the parameter text in the chart's top-left)",
+                    Margin = new Thickness(2, 0, 2, 0), Padding = new Thickness(2),
+                    Content = labelsButtonText,
+                    Style = FlatStyle(),
+                };
+                labelsButton.Click      += ToggleIndicatorLabels;
+                labelsButton.MouseEnter += (s, e) => labelsButton.Background = ButtonHoverBg;
+                labelsButton.MouseLeave += (s, e) => labelsButton.Background = ButtonBg;
+                UpdateLabelsButtonVisual();
+                p.Children.Add(labelsButton);
+            }
+
+            // Drawing Template Picker
+            {
+                templatePickerButton = new Button
+                {
+                    Width = BtnSize + 4, Height = BtnSize - 4, Background = ButtonBg,
+                    BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand,
+                    ToolTip = "Apply Template to Selected Drawing\n\nSelect a drawing tool on the chart first, then click to choose a template.",
+                    Margin = new Thickness(2, 0, 2, 0), Padding = new Thickness(2),
+                    Content = MakeDrawingTemplateIcon(BtnSize - 10),
+                    Style = FlatStyle(),
+                    Foreground = InactiveBrush,
+                    Opacity = 0.5,       // starts dimmed — no drawing selected yet
+                };
+                templatePickerButton.Click      += ShowDrawingTemplatePicker;
+                templatePickerButton.MouseEnter += (s, e) => templatePickerButton.Background = ButtonHoverBg;
+                templatePickerButton.MouseLeave += (s, e) => templatePickerButton.Background = ButtonBg;
+                p.Children.Add(templatePickerButton);
+
+                // Poll for selected drawing tool to light up the button
+                var selPollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+                selPollTimer.Tick += (s, e) =>
+                {
+                    try
+                    {
+                        bool anySelected = DrawObjects.Any(d =>
+                            d is NinjaTrader.NinjaScript.DrawingTools.DrawingTool dt && dt.IsSelected);
+                        templatePickerButton.Opacity   = anySelected ? 1.0 : 0.5;
+                        templatePickerButton.Foreground = anySelected ? ActiveBrush : InactiveBrush;
+                        templatePickerButton.ToolTip = anySelected
+                            ? "Apply Template to Selected Drawing"
+                            : "Apply Template to Selected Drawing\n\nSelect a drawing tool on the chart first.";
+
+                        // Keep the mute button in sync — the flag is global, so a
+                        // toolbar on another chart may have toggled it
+                        UpdateMuteButtonVisual();
+                    }
+                    catch { }
+                };
+                selPollTimer.Start();
+            }
+
             // Command Center
             if (ShowCommandCenter)
             {
@@ -630,6 +1019,11 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             var del = MakeUtilBtn("🗑", "Delete All Drawings", DeleteAll);
             del.Foreground = DangerBrush;
             p.Children.Add(del);
+
+            // Global voice-alert mute (suite-wide via static RedTailGlobal flag)
+            muteButton = MakeUtilBtn("🔊", "Mute ALL RedTail voice alerts (global, all charts)", ToggleVoiceMute);
+            p.Children.Add(muteButton);
+            UpdateMuteButtonVisual();
 
             AddSep(p);
 
@@ -692,6 +1086,26 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 p.Children.Add(beButton);
             }
 
+            // Trade Review Toggle
+            {
+                AddSep(p);
+                tradeReviewButton = new Button
+                {
+                    Width = BtnSize + 4, Height = BtnSize - 4, Background = ButtonBg,
+                    BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
+                    Cursor = Cursors.Hand,
+                    ToolTip = "Toggle Trade Review — shows all today's fills as position boxes on the chart",
+                    Margin = new Thickness(2, 0, 2, 0),
+                    Content = MakeTradeReviewIcon(BtnSize - 10),
+                    Foreground = InactiveBrush,
+                    Style = FlatStyle(),
+                };
+                tradeReviewButton.Click      += ToggleTradeReview;
+                tradeReviewButton.MouseEnter += (s, e) => tradeReviewButton.Background = ButtonHoverBg;
+                tradeReviewButton.MouseLeave += (s, e) => tradeReviewButton.Background = ButtonBg;
+                p.Children.Add(tradeReviewButton);
+            }
+
             // Pan Mode
             if (ShowPanButton)
             {
@@ -722,7 +1136,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 {
                     Width = BtnSize + 4, Height = BtnSize - 4, Background = ButtonBg,
                     BorderBrush = Brushes.Transparent, BorderThickness = new Thickness(0),
-                    Cursor = Cursors.Hand, ToolTip = "Screenshot Chart",
+                    Cursor = Cursors.Hand, ToolTip = "Screenshot Chart (saves PNG + copies to clipboard)",
                     Margin = new Thickness(2, 0, 2, 0), Padding = new Thickness(2),
                     Content = MakeScreenshotIcon(BtnSize - 10),
                     Style = FlatStyle()
@@ -788,6 +1202,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 WindowStartupLocation = WindowStartupLocation.CenterScreen,
                 Background = SettingsBg,
                 ResizeMode = ResizeMode.CanResize,
+                Owner = chartWindow,  // FIX: keep popup with its chart; closes with it
             };
 
             var mainGrid = new Grid();
@@ -1626,6 +2041,12 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             ChartControl.PreviewMouseLeftButtonDown += Pan_MouseDown;
             ChartControl.PreviewMouseLeftButtonUp   += Pan_MouseUp;
             ChartControl.MouseLeave                 += Pan_MouseLeave;
+            // FIX: if Windows steals focus mid-drag (notification, alt-tab) the
+            // simulated Ctrl could stay pressed system-wide. Release it whenever
+            // mouse capture is lost or the chart window deactivates.
+            ChartControl.LostMouseCapture           += Pan_MouseLeave;
+            if (chartWindow != null)
+                chartWindow.Deactivated             += Pan_WindowDeactivated;
         }
 
         private void RemovePanHandlers()
@@ -1636,8 +2057,18 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 ChartControl.PreviewMouseLeftButtonDown -= Pan_MouseDown;
                 ChartControl.PreviewMouseLeftButtonUp   -= Pan_MouseUp;
                 ChartControl.MouseLeave                 -= Pan_MouseLeave;
+                ChartControl.LostMouseCapture           -= Pan_MouseLeave;
+                if (chartWindow != null)
+                    chartWindow.Deactivated             -= Pan_WindowDeactivated;
             }
             catch { }
+        }
+
+        private void Pan_WindowDeactivated(object sender, EventArgs e)
+        {
+            if (!panDragging) return;
+            try { keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero); } catch { }
+            panDragging = false;
         }
 
         private void Pan_MouseDown(object sender, MouseButtonEventArgs e)
@@ -1675,50 +2106,89 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
         #region Break Even
 
+        /// <summary>
+        /// FIX: resolve the account from this chart's ChartTrader selector instead
+        /// of taking the first connected account with a position. With a prop and
+        /// a sim account connected simultaneously, the old scan could silently
+        /// modify stops on the wrong account.
+        /// </summary>
+        private Account GetChartTraderAccount()
+        {
+            try
+            {
+                if (chartWindow == null) return null;
+                var selector = chartWindow.FindFirst("ChartTraderControlAccountSelector")
+                    as NinjaTrader.Gui.Tools.AccountSelector;
+                if (selector != null)
+                    return selector.SelectedAccount;
+            }
+            catch { }
+            return null;
+        }
+
         private void BreakEvenClick(object sender, RoutedEventArgs e)
         {
             try
             {
                 if (ChartControl == null) return;
 
-                Account acct = null;
-                // Find the first connected account with a position on this instrument
-                lock (Account.All)
+                // Preferred: the account selected in this chart's ChartTrader
+                Account acct = GetChartTraderAccount();
+                if (acct != null && acct.ConnectionStatus != ConnectionStatus.Connected)
+                    acct = null;
+
+                // Fallback: first connected account with a position on this instrument
+                if (acct == null)
                 {
-                    foreach (Account a in Account.All)
+                    lock (Account.All)
                     {
-                        if (a.ConnectionStatus != ConnectionStatus.Connected) continue;
-                        foreach (Position pos in a.Positions)
+                        foreach (Account a in Account.All)
                         {
-                            if (pos.Instrument == Instrument && pos.MarketPosition != MarketPosition.Flat)
+                            if (a.ConnectionStatus != ConnectionStatus.Connected) continue;
+                            // FIX: Positions is mutated on NT's position threads — lock it
+                            lock (a.Positions)
                             {
-                                acct = a;
-                                break;
+                                foreach (Position pos in a.Positions)
+                                {
+                                    if (pos.Instrument == Instrument && pos.MarketPosition != MarketPosition.Flat)
+                                    {
+                                        acct = a;
+                                        break;
+                                    }
+                                }
                             }
+                            if (acct != null) break;
                         }
-                        if (acct != null) break;
                     }
                 }
 
                 if (acct == null)
                 {
-                    Print("RT BE: No open position found for " + Instrument.FullName);
+                    Print("RT BE: No account / open position found for " + Instrument.FullName);
                     FlashBE(false);
                     return;
                 }
 
-                // Get position details
+                // Get position details (under lock)
                 Position position = null;
-                foreach (Position pos in acct.Positions)
+                lock (acct.Positions)
                 {
-                    if (pos.Instrument == Instrument && pos.MarketPosition != MarketPosition.Flat)
+                    foreach (Position pos in acct.Positions)
                     {
-                        position = pos;
-                        break;
+                        if (pos.Instrument == Instrument && pos.MarketPosition != MarketPosition.Flat)
+                        {
+                            position = pos;
+                            break;
+                        }
                     }
                 }
 
-                if (position == null) { FlashBE(false); return; }
+                if (position == null)
+                {
+                    Print("RT BE: No open position on account " + acct.Name + " for " + Instrument.FullName);
+                    FlashBE(false);
+                    return;
+                }
 
                 double entryPrice = position.AveragePrice;
                 double tickSize   = Instrument.MasterInstrument.TickSize;
@@ -1729,11 +2199,27 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 else
                     bePrice = entryPrice - (BreakEvenTicks * tickSize);
 
-                // Check that BE price makes sense (position must be in profit enough)
-                double lastPrice = GetCurrentBid() > 0 ? GetCurrentBid() : Close[0];
+                // FIX: AveragePrice is frequently off-tick on multi-fill positions
+                // (e.g. the average of two MNQ fills lands on a half tick). A stop
+                // at a non-tick price gets rejected by the exchange. Round to tick,
+                // and round TOWARD profit so we never end up worse than break even.
+                double rounded = Instrument.MasterInstrument.RoundToTickSize(bePrice);
+                if (position.MarketPosition == MarketPosition.Long  && rounded < bePrice)
+                    rounded += tickSize;
+                if (position.MarketPosition == MarketPosition.Short && rounded > bePrice)
+                    rounded -= tickSize;
+                bePrice = Instrument.MasterInstrument.RoundToTickSize(rounded);
+
+                // Check that BE price makes sense (position must be in profit enough).
+                // FIX: a long's sell stop triggers off the bid, a short's buy stop
+                // off the ask — use the correct side for each.
+                double marketPrice = position.MarketPosition == MarketPosition.Long
+                    ? GetCurrentBid() : GetCurrentAskSafe();
+                if (marketPrice <= 0) marketPrice = Close[0];
+
                 bool inProfit = position.MarketPosition == MarketPosition.Long
-                    ? lastPrice >= bePrice
-                    : lastPrice <= bePrice;
+                    ? marketPrice >= bePrice
+                    : marketPrice <= bePrice;
 
                 if (!inProfit)
                 {
@@ -1742,38 +2228,57 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     return;
                 }
 
-                // Find and modify stop loss orders
-                int modified = 0;
-                foreach (Order order in acct.Orders)
+                // Collect eligible stop orders under lock, modify outside the lock
+                // (FIX: Orders is mutated on NT's order threads — iterating it
+                // unlocked can throw mid-trade; calling Change inside the lock
+                // risks deadlock with NT's internals).
+                var eligible = new List<Order>();
+                lock (acct.Orders)
                 {
-                    if (order.Instrument != Instrument) continue;
-                    if (order.OrderState != OrderState.Accepted && order.OrderState != OrderState.Working) continue;
-                    if (order.OrderType != OrderType.StopMarket && order.OrderType != OrderType.StopLimit) continue;
+                    foreach (Order order in acct.Orders)
+                    {
+                        if (order.Instrument != Instrument) continue;
+                        if (order.OrderState != OrderState.Accepted && order.OrderState != OrderState.Working) continue;
+                        if (order.OrderType != OrderType.StopMarket && order.OrderType != OrderType.StopLimit) continue;
 
-                    // Determine if this is a stop for our position direction
-                    bool isStopForLong = (position.MarketPosition == MarketPosition.Long &&
-                        (order.OrderAction == OrderAction.Sell || order.OrderAction == OrderAction.SellShort));
-                    bool isStopForShort = (position.MarketPosition == MarketPosition.Short &&
-                        (order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.BuyToCover));
+                        // Determine if this is a stop for our position direction
+                        bool isStopForLong = (position.MarketPosition == MarketPosition.Long &&
+                            (order.OrderAction == OrderAction.Sell || order.OrderAction == OrderAction.SellShort));
+                        bool isStopForShort = (position.MarketPosition == MarketPosition.Short &&
+                            (order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.BuyToCover));
 
-                    if (!isStopForLong && !isStopForShort) continue;
+                        if (!isStopForLong && !isStopForShort) continue;
 
-                    // Only move stop UP for longs, DOWN for shorts (never away from profit)
-                    if (position.MarketPosition == MarketPosition.Long && order.StopPrice >= bePrice) continue;
-                    if (position.MarketPosition == MarketPosition.Short && order.StopPrice <= bePrice) continue;
+                        // Only move stop UP for longs, DOWN for shorts (never away from profit)
+                        if (position.MarketPosition == MarketPosition.Long && order.StopPrice >= bePrice) continue;
+                        if (position.MarketPosition == MarketPosition.Short && order.StopPrice <= bePrice) continue;
 
+                        eligible.Add(order);
+                    }
+                }
+
+                int modified = 0;
+                foreach (Order order in eligible)
+                {
                     try
                     {
                         // Set the changed properties on the order object, then call Change with Order[] only
                         order.StopPriceChanged = bePrice;
                         order.QuantityChanged  = order.Quantity;
                         if (order.OrderType == OrderType.StopLimit)
-                            order.LimitPriceChanged = bePrice;
+                        {
+                            // FIX: preserve the order's original stop→limit offset
+                            // instead of collapsing the limit onto the stop, which
+                            // can leave a stop-limit unfilled in a fast move.
+                            double limitOffset = order.LimitPrice - order.StopPrice;
+                            order.LimitPriceChanged = Instrument.MasterInstrument.RoundToTickSize(bePrice + limitOffset);
+                        }
 
                         acct.Change(new[] { order });
 
                         modified++;
                         Print("RT BE: Moved stop to " + bePrice.ToString("F" + GetPriceDecimals()) +
+                            " on account " + acct.Name +
                             " (entry=" + entryPrice.ToString("F" + GetPriceDecimals()) +
                             ", offset=" + BreakEvenTicks + " ticks)");
                     }
@@ -1784,7 +2289,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     FlashBE(true);
                 else
                 {
-                    Print("RT BE: No eligible stop orders found to modify");
+                    Print("RT BE: No eligible stop orders found to modify on account " + acct.Name);
                     FlashBE(false);
                 }
             }
@@ -1807,6 +2312,17 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             {
                 if (BarsArray != null && BarsArray.Length > 0)
                     return GetCurrentBid(0);
+            }
+            catch { }
+            return 0;
+        }
+
+        private double GetCurrentAskSafe()
+        {
+            try
+            {
+                if (BarsArray != null && BarsArray.Length > 0)
+                    return GetCurrentAsk(0);
             }
             catch { }
             return 0;
@@ -1926,37 +2442,268 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
             return c;
         }
 
+        private const char HiddenKeySeparator = '|';
+
+        // ── Indicator Labels Toggle ──────────────────────────────────────────
+
+        private void ToggleIndicatorLabels(object sender, RoutedEventArgs e)
+        {
+            HideIndicatorLabels = !HideIndicatorLabels;
+            ApplyLabelVisibility();
+            UpdateLabelsButtonVisual();
+            Print("RT: Indicator labels " + (HideIndicatorLabels ? "hidden" : "shown"));
+        }
+
+        private void UpdateLabelsButtonVisual()
+        {
+            if (labelsButton == null || labelsButtonText == null) return;
+            labelsButtonText.TextDecorations = HideIndicatorLabels ? TextDecorations.Strikethrough : null;
+            labelsButton.Foreground = HideIndicatorLabels ? ActiveBrush : InactiveBrush;
+            labelsButton.ToolTip = HideIndicatorLabels
+                ? "Indicator labels are hidden — click to restore"
+                : "Hide indicator labels (the parameter text in the chart's top-left)";
+        }
+
+        // DisplayName is publicly read-only (CS0200) — the indicator dialog's
+        // "Label" field writes to internal state. Resolve a non-public setter or
+        // the private backing field once via reflection, cache, and reuse.
+        private static System.Reflection.MethodInfo cachedDisplayNameSetter;
+        private static System.Reflection.FieldInfo  cachedDisplayNameField;
+        private static bool displayNameReflectionResolved;
+        private bool labelWarningPrinted;
+
+        private static bool TrySetDisplayName(NinjaTrader.NinjaScript.IndicatorBase ind, string value)
+        {
+            try
+            {
+                if (!displayNameReflectionResolved)
+                {
+                    displayNameReflectionResolved = true;
+                    Type t = ind.GetType();
+                    while (t != null)
+                    {
+                        // 1) A non-public setter on the DisplayName property?
+                        var prop = t.GetProperty("DisplayName",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                        if (prop != null)
+                        {
+                            var setter = prop.GetSetMethod(true);
+                            if (setter != null) { cachedDisplayNameSetter = setter; break; }
+                        }
+                        // 2) Otherwise the private backing field on this level?
+                        foreach (var f in t.GetFields(BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                        {
+                            if (f.FieldType == typeof(string) &&
+                                f.Name.IndexOf("displayName", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                cachedDisplayNameField = f;
+                                break;
+                            }
+                        }
+                        if (cachedDisplayNameField != null) break;
+                        t = t.BaseType;
+                    }
+                }
+
+                if (cachedDisplayNameSetter != null)
+                {
+                    cachedDisplayNameSetter.Invoke(ind, new object[] { value });
+                    return true;
+                }
+                if (cachedDisplayNameField != null)
+                {
+                    cachedDisplayNameField.SetValue(ind, value);
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// Blanks or restores DisplayName on every chart indicator (including this
+        /// toolbar). A blank DisplayName makes NT skip drawing that label line —
+        /// same effect as manually clearing the Label field in each dialog.
+        /// Restoring writes null, which makes NT's getter lazily regenerate the
+        /// default label — self-healing even if a blank was saved into the
+        /// workspace (DisplayName serializes).
+        /// </summary>
+        private void ApplyLabelVisibility()
+        {
+            try
+            {
+                if (ChartControl == null) return;
+
+                var all = new List<NinjaTrader.NinjaScript.IndicatorBase>(GetChartIndicators());
+                all.Add(this);  // the toolbar has a label line of its own
+
+                bool anyFailed = false;
+                foreach (var ind in all)
+                {
+                    try
+                    {
+                        if (HideIndicatorLabels)
+                        {
+                            if (!string.IsNullOrEmpty(ind.DisplayName))
+                            {
+                                savedLabels[ind] = ind.DisplayName;  // stash for restore
+                                if (!TrySetDisplayName(ind, string.Empty))
+                                    anyFailed = true;
+                            }
+                        }
+                        else if (string.IsNullOrEmpty(ind.DisplayName))
+                        {
+                            // Restore the stashed custom label if we have one;
+                            // otherwise write null so the getter regenerates the default.
+                            string restore;
+                            savedLabels.TryGetValue(ind, out restore);
+                            if (string.IsNullOrEmpty(restore)) restore = null;
+                            if (!TrySetDisplayName(ind, restore))
+                                anyFailed = true;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (anyFailed && !labelWarningPrinted)
+                {
+                    labelWarningPrinted = true;
+                    Print("RT: Could not locate DisplayName setter on this NT build — label toggle unavailable");
+                }
+
+                ChartControl.InvalidateVisual();
+            }
+            catch (Exception ex) { Print("RT: Error applying label visibility: " + ex.Message); }
+        }
+
+        // ── Global Voice Mute ────────────────────────────────────────────────
+
+        private void ToggleVoiceMute(object sender, RoutedEventArgs e)
+        {
+            RedTailGlobal.VoiceAlertsMuted = !RedTailGlobal.VoiceAlertsMuted;
+            UpdateMuteButtonVisual();
+            Print("RT: Voice alerts " + (RedTailGlobal.VoiceAlertsMuted ? "MUTED" : "unmuted") + " (suite-wide)");
+        }
+
+        private void UpdateMuteButtonVisual()
+        {
+            if (muteButton == null) return;
+            bool m = RedTailGlobal.VoiceAlertsMuted;
+            muteButton.Content    = m ? "🔇" : "🔊";
+            muteButton.Foreground = m ? DangerBrush : InactiveBrush;
+            muteButton.ToolTip    = m
+                ? "Voice alerts MUTED suite-wide — click to unmute"
+                : "Mute ALL RedTail voice alerts (global, all charts)";
+        }
+
         private void LoadIndicatorVisibility()
         {
             hiddenIndicators = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (File.Exists(IndSettingsFile))
+            try
             {
-                try
+                // FIX: read from the serialized per-chart property instead of the
+                // old global txt file. By State.DataLoaded NT has already
+                // deserialized workspace properties, so the value is ready here.
+                if (!string.IsNullOrEmpty(HiddenIndicatorsSerialized))
                 {
-                    var lines = File.ReadAllLines(IndSettingsFile);
-                    foreach (var line in lines)
+                    foreach (var part in HiddenIndicatorsSerialized.Split(
+                        new[] { HiddenKeySeparator }, StringSplitOptions.RemoveEmptyEntries))
                     {
-                        string trimmed = line.Trim();
-                        if (!string.IsNullOrEmpty(trimmed))
+                        string trimmed = part.Trim();
+                        if (trimmed.Length > 0)
                             hiddenIndicators.Add(trimmed);
                     }
-                    Print("RT: Loaded " + hiddenIndicators.Count + " hidden indicator names");
-
-                    // Apply saved visibility state to chart indicators
-                    ApplyIndicatorVisibility();
                 }
-                catch (Exception ex) { Print("RT: Error loading indicator visibility: " + ex.Message); }
+                Print("RT: Loaded " + hiddenIndicators.Count + " hidden indicator keys (per-chart)");
+
+                // Apply saved visibility state to chart indicators
+                ApplyIndicatorVisibility();
+                ApplyLabelVisibility();
+
+                // FIX: other indicators on the chart may not be registered in
+                // ChartControl.Indicators yet at DataLoaded (init order is not
+                // guaranteed), which made the initial apply hit-or-miss. Re-apply
+                // a few times over the first seconds to catch late initializers.
+                StartVisibilityRetry();
             }
+            catch (Exception ex) { Print("RT: Error loading indicator visibility: " + ex.Message); }
+        }
+
+        private void StartVisibilityRetry()
+        {
+            try
+            {
+                bool anyHidden = hiddenIndicators != null && hiddenIndicators.Count > 0;
+                if (!anyHidden && !HideIndicatorLabels) return;
+                if (visibilityRetryTimer != null) visibilityRetryTimer.Stop();
+
+                visibilityRetryCount = 0;
+                visibilityRetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                visibilityRetryTimer.Tick += (s, e) =>
+                {
+                    visibilityRetryCount++;
+                    ApplyIndicatorVisibility();
+                    ApplyLabelVisibility();  // catch late-initializing indicators too
+                    if (visibilityRetryCount >= 5 && visibilityRetryTimer != null)
+                        visibilityRetryTimer.Stop();
+                };
+                visibilityRetryTimer.Start();
+            }
+            catch { }
         }
 
         private void SaveIndicatorVisibility()
         {
             try
             {
-                File.WriteAllLines(IndSettingsFile, hiddenIndicators.ToArray());
-                Print("RT: Saved " + hiddenIndicators.Count + " hidden indicator names");
+                // FIX: persist into the chart's own serialized property so the
+                // hidden set travels with this chart in the workspace, instead of
+                // a single global file shared (and clobbered) by every chart.
+                HiddenIndicatorsSerialized = string.Join(
+                    HiddenKeySeparator.ToString(), hiddenIndicators.ToArray());
+                Print("RT: Saved " + hiddenIndicators.Count + " hidden indicator keys (per-chart)");
             }
             catch (Exception ex) { Print("RT: Error saving indicator visibility: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Base identity for an indicator. ToString() includes parameters
+        /// (e.g. "EMA(20)"), so two differently-configured instances of the same
+        /// indicator no longer collide the way bare Name ("EMA") did.
+        /// </summary>
+        private string GetIndicatorBaseKey(NinjaTrader.NinjaScript.IndicatorBase ind)
+        {
+            string key = null;
+            try { key = ind.ToString(); } catch { }
+            if (string.IsNullOrEmpty(key)) key = ind.Name;
+            if (string.IsNullOrEmpty(key)) key = ind.GetType().Name;
+            // Separator char must never appear inside a key
+            return key.Replace(HiddenKeySeparator, '/');
+        }
+
+        /// <summary>
+        /// Builds a unique, deterministic key per indicator instance. Identical
+        /// instances (same name AND same parameters) get a " #2", " #3" suffix in
+        /// chart-collection order, which is stable across sessions because NT
+        /// restores indicators in the order they were added.
+        /// FIX: previously keys were bare ind.Name, so hiding one instance hid
+        /// every instance sharing that name on the next apply pass.
+        /// </summary>
+        private Dictionary<NinjaTrader.NinjaScript.IndicatorBase, string> BuildIndicatorKeys(
+            List<NinjaTrader.NinjaScript.IndicatorBase> indicators)
+        {
+            var keys = new Dictionary<NinjaTrader.NinjaScript.IndicatorBase, string>();
+            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var ind in indicators)
+            {
+                string baseKey = GetIndicatorBaseKey(ind);
+                int n;
+                counts.TryGetValue(baseKey, out n);
+                n++;
+                counts[baseKey] = n;
+                keys[ind] = (n == 1) ? baseKey : baseKey + " #" + n;
+            }
+            return keys;
         }
 
         /// <summary>Check if an indicator is a RedTail indicator by Name or type name.</summary>
@@ -2027,15 +2774,27 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         {
             try
             {
+                if (hiddenIndicators == null) return;
                 var indicators = GetChartIndicators();
+                if (indicators.Count == 0) return;
+
+                // Keys must be built on the raw collection order (not sorted) so
+                // duplicate-instance suffixes (#2, #3) stay stable across sessions.
+                var keys = BuildIndicatorKeys(indicators);
+
                 foreach (var ind in indicators)
                 {
-                    string indKey = !string.IsNullOrEmpty(ind.Name) ? ind.Name : ind.GetType().Name;
-                    if (hiddenIndicators.Contains(indKey))
-                        SetIndicatorVisible(ind, false);
+                    bool shouldBeVisible = !hiddenIndicators.Contains(keys[ind]);
+                    // FIX: apply unconditionally instead of guarding on
+                    // ind.IsVisible != shouldBeVisible. The old guard meant an
+                    // indicator whose IsVisible flag and plot-brush opacity got
+                    // out of sync (e.g. opacity 0 persisted into the workspace by
+                    // older toolbar builds) could never self-heal and looked
+                    // permanently deleted. SetIndicatorVisible now also repairs
+                    // those zero-opacity brushes.
+                    SetIndicatorVisible(ind, shouldBeVisible);
                 }
-                if (hiddenIndicators.Count > 0)
-                    ForceChartRerender();
+                ChartControl.InvalidateVisual();
             }
             catch (Exception ex) { Print("RT: Error applying indicator visibility: " + ex.Message); }
         }
@@ -2044,21 +2803,24 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         {
             try
             {
-                // Set IsVisible directly - it's a public property on IndicatorBase
+                // Set IsVisible directly - it's a public property on IndicatorBase.
+                // NT8 skips rendering invisible indicators, so this alone is enough.
                 ind.IsVisible = visible;
 
-                // Also toggle plot brush opacity (some indicators need this)
-                if (ind.Plots != null)
+                // FIX: the old code hid indicators by replacing every plot.Brush
+                // with a copy at Opacity = 0. NT serializes plot brushes (including
+                // Opacity) into the workspace XML, so a chart saved while hidden
+                // could come back with IsVisible = true but invisible plots —
+                // indistinguishable from the indicator having been deleted.
+                // We no longer touch brush opacity to hide. When showing, repair
+                // any zero-opacity brushes left behind by earlier builds.
+                if (visible && ind.Plots != null)
                 {
                     foreach (var plot in ind.Plots)
                     {
-                        if (plot.Brush is SolidColorBrush brush)
-                        {
-                            plot.Brush = new SolidColorBrush(brush.Color)
-                            {
-                                Opacity = visible ? 1.0 : 0.0
-                            };
-                        }
+                        var scb = plot.Brush as SolidColorBrush;
+                        if (scb != null && scb.Opacity == 0.0)
+                            plot.Brush = new SolidColorBrush(scb.Color) { Opacity = 1.0 };
                     }
                 }
 
@@ -2119,23 +2881,15 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         {
             try
             {
-                if (chartWindow == null || ChartControl == null) return;
+                if (ChartControl == null) return;
 
-                // Send F5 (Refresh) to the chart window - this is the only reliable way
-                // to force NT8's SharpDX render pipeline to fully re-render after
-                // changing indicator visibility from outside the chart's own event loop
-                ChartControl.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+                // InvalidateVisual triggers a WPF repaint pass without reinitializing
+                // indicators. The old F5 keybd_event approach caused NT8 to fully reload
+                // the chart, creating new indicator instances and discarding any IsVisible
+                // changes made to the old ones before the repaint fired.
+                ChartControl.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
                 {
-                    try
-                    {
-                        // Focus the chart window first
-                        chartWindow.Activate();
-
-                        // Send F5 key press/release
-                        const byte VK_F5 = 0x74;
-                        keybd_event(VK_F5, 0, KEYEVENTF_KEYDOWN, UIntPtr.Zero);
-                        keybd_event(VK_F5, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                    }
+                    try { ChartControl.InvalidateVisual(); }
                     catch { }
                 }));
             }
@@ -2156,8 +2910,12 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     return;
                 }
 
-                // Sort alphabetically
-                indicators.Sort((a, b) => string.Compare(GetIndicatorDisplayName(a), GetIndicatorDisplayName(b), StringComparison.OrdinalIgnoreCase));
+                // Build unique per-instance keys BEFORE sorting, so duplicate
+                // suffixes (#2, #3) follow the stable chart-collection order.
+                var indKeys = BuildIndicatorKeys(indicators);
+
+                // Sort alphabetically (by unique key so duplicates group together)
+                indicators.Sort((a, b) => string.Compare(indKeys[a], indKeys[b], StringComparison.OrdinalIgnoreCase));
 
                 // Build popup window
                 var managerWindow = new Window
@@ -2168,6 +2926,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Background = SettingsBg,
                     ResizeMode = ResizeMode.CanResize,
+                    Owner = chartWindow,  // FIX: keep popup with its chart; closes with it
                 };
 
                 var mainGrid = new Grid();
@@ -2218,7 +2977,10 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 // One row per indicator: checkbox + delete button
                 foreach (var ind in indicators)
                 {
-                    string displayName = GetIndicatorDisplayName(ind);
+                    // Show the unique key (includes parameters + #n suffix for
+                    // duplicates) so two instances of the same indicator are
+                    // distinguishable in the list.
+                    string displayName = indKeys[ind];
 
                     bool isVisible = GetIndicatorIsVisible(ind);
 
@@ -2259,9 +3021,9 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     delBtn.Click += (s, ev) =>
                     {
                         var result = MessageBox.Show(
-                            "Remove \"" + capturedInd.Name + "\" from the chart?",
+                            "Remove \"" + indKeys[capturedInd] + "\" from the chart?\n\nThis permanently deletes the indicator from this chart (it is NOT the same as hiding it).",
                             "RedTail HTS/STS",
-                            MessageBoxButton.YesNo, MessageBoxImage.Question);
+                            MessageBoxButton.YesNo, MessageBoxImage.Warning);
                         if (result == MessageBoxResult.Yes)
                         {
                             try
@@ -2271,8 +3033,8 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                                 indicatorRows.Remove(capturedInd);
                                 stack.Children.Remove(capturedRow);
 
-                                // Remove from hidden set if present
-                                hiddenIndicators.Remove(!string.IsNullOrEmpty(capturedInd.Name) ? capturedInd.Name : capturedInd.GetType().Name);
+                                // Remove from hidden set if present (unique key)
+                                hiddenIndicators.Remove(indKeys[capturedInd]);
                                 SaveIndicatorVisibility();
 
                                 // Remove indicator from chart via ChartControl
@@ -2280,9 +3042,15 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                                 {
                                     try
                                     {
-                                        ChartControl.Indicators.Remove(capturedInd as NinjaTrader.Gui.NinjaScript.IndicatorRenderBase);
+                                        var renderBase = capturedInd as NinjaTrader.Gui.NinjaScript.IndicatorRenderBase;
+                                        if (renderBase != null)
+                                            ChartControl.Indicators.Remove(renderBase);
+                                        // FIX: terminate the instance so it stops
+                                        // running headlessly after removal from the
+                                        // UI collection (the old code skipped this).
+                                        try { capturedInd.SetState(State.Terminated); } catch { }
                                         ForceChartRerender();
-                                        Print("RT: Deleted indicator " + capturedInd.Name + " from chart");
+                                        Print("RT: Deleted indicator " + indKeys[capturedInd] + " from chart");
                                     }
                                     catch (Exception ex) { Print("RT: Error deleting indicator: " + ex.Message); }
                                 }));
@@ -2331,7 +3099,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                         bool show = kvp.Value.IsChecked == true;
 
                         if (!show)
-                            hiddenIndicators.Add(!string.IsNullOrEmpty(ind.Name) ? ind.Name : ind.GetType().Name);
+                            hiddenIndicators.Add(indKeys[ind]);
 
                         SetIndicatorVisible(ind, show);
                     }
@@ -2361,6 +3129,597 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         #endregion
 
         #region Command Center
+
+        // ── Trade Review ──────────────────────────────────────────────────────────
+
+        private void ToggleTradeReview(object sender, RoutedEventArgs e)
+        {
+            tradeReviewActive = !tradeReviewActive;
+            tradeReviewButton.Foreground = tradeReviewActive ? ActiveBrush : InactiveBrush;
+
+            if (!tradeReviewActive)
+            {
+                ClearTradeReviewDrawings();
+                return;
+            }
+
+            DrawTradeReview();
+        }
+
+        private void ClearTradeReviewDrawings()
+        {
+            try
+            {
+                reviewTrades.Clear();
+                if (tradeMouseHooked && ChartControl != null)
+                {
+                    ChartControl.MouseMove -= TradeReview_MouseMove;
+                    tradeMouseHooked = false;
+                }
+                ChartControl?.InvalidateVisual();
+            }
+            catch (Exception ex) { Print("RT TradeReview clear error: " + ex.Message); }
+        }
+
+        private void TradeReview_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            try
+            {
+                tradeReviewMouse = e.GetPosition(ChartControl);
+                ChartControl?.InvalidateVisual();
+            }
+            catch { }
+        }
+
+        private void DrawTradeReview()
+        {
+            try
+            {
+                ClearTradeReviewDrawings();
+
+                // ── Resolve account ──
+                // Try to read the account selected in the chart's ChartTrader first
+                Account acct = null;
+                try
+                {
+                    if (chartWindow != null)
+                    {
+                        var ctProp = chartWindow.GetType().GetProperty("ChartTrader",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                        if (ctProp != null)
+                        {
+                            var ct = ctProp.GetValue(chartWindow);
+                            if (ct != null)
+                            {
+                                var aProp = ct.GetType().GetProperty("Account",
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                if (aProp != null)
+                                    acct = aProp.GetValue(ct) as Account;
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                // If ChartTrader reflection failed, build a list of real accounts and pick
+                if (acct == null)
+                {
+                    var realAccounts = new List<Account>();
+                    lock (Account.All)
+                        foreach (Account a in Account.All)
+                            if (a.ConnectionStatus == ConnectionStatus.Connected &&
+                                a.Name != "Backfill" && !a.Name.StartsWith("Backfill"))
+                                realAccounts.Add(a);
+
+                    if (realAccounts.Count == 0)
+                    { Print("RT TradeReview: no connected accounts found"); return; }
+
+                    if (realAccounts.Count == 1)
+                    {
+                        acct = realAccounts[0];
+                    }
+                    else
+                    {
+                        // Multiple accounts — show a quick picker
+                        Account picked = null;
+                        var pickDone = new System.Threading.ManualResetEventSlim(false);
+
+                        ChartControl.Dispatcher.Invoke(() =>
+                        {
+                            var win = new Window
+                            {
+                                Title = "Select Account — Trade Review",
+                                Width = 300, Height = 80 + realAccounts.Count * 40,
+                                Background = FB(28, 28, 28),
+                                WindowStyle = WindowStyle.ToolWindow,
+                                ResizeMode = ResizeMode.NoResize,
+                                Topmost = true,
+                                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                                Owner = chartWindow,
+                            };
+                            var stack = new StackPanel { Margin = new Thickness(10) };
+                            stack.Children.Add(new TextBlock
+                            {
+                                Text = "Choose account to review:",
+                                Foreground = FB(180, 180, 180), FontSize = 11,
+                                Margin = new Thickness(0, 0, 0, 8),
+                            });
+                            foreach (var a in realAccounts)
+                            {
+                                var captured = a;
+                                var btn = new Button
+                                {
+                                    Content = a.Name,
+                                    HorizontalContentAlignment = HorizontalAlignment.Left,
+                                    Padding = new Thickness(10, 6, 10, 6),
+                                    Margin = new Thickness(0, 1, 0, 1),
+                                    Background = FB(40, 40, 40),
+                                    BorderBrush = FB(60, 60, 60),
+                                    BorderThickness = new Thickness(0, 0, 0, 1),
+                                    Foreground = Brushes.White,
+                                    FontSize = 12, Cursor = Cursors.Hand,
+                                    Style = FlatStyle(),
+                                };
+                                btn.MouseEnter += (s2, e2) => btn.Background = FB(0, 80, 55);
+                                btn.MouseLeave += (s2, e2) => btn.Background = FB(40, 40, 40);
+                                btn.Click += (s2, e2) => { picked = captured; win.Close(); };
+                                stack.Children.Add(btn);
+                            }
+                            win.Content = stack;
+                            win.ShowDialog();
+                            pickDone.Set();
+                        });
+
+                        pickDone.Wait(5000);
+                        acct = picked;
+                        if (acct == null) { Print("RT TradeReview: no account selected"); return; }
+                    }
+                }
+
+                Print("RT TradeReview: using account \"" + acct.Name + "\"");
+
+                // ── Collect executions for this instrument ──
+                var execs = new List<Execution>();
+                lock (acct.Executions)
+                    foreach (Execution ex in acct.Executions)
+                        if (ex.Instrument != null &&
+                            ex.Instrument.MasterInstrument.Name == Instrument.MasterInstrument.Name)
+                            execs.Add(ex);
+
+                if (execs.Count == 0) { Print("RT TradeReview: no executions found for " + Instrument.MasterInstrument.Name); return; }
+
+                // Sort chronologically
+                execs = execs.OrderBy(x => x.Time).ToList();
+
+                // ── Pair entries with exits, tracking partial groups ──────────────
+                // First pass: build raw partials with group IDs
+                var rawTrades  = new List<ReviewTrade>();
+                double runningQty   = 0;
+                double entryPrice   = 0;
+                DateTime entryTime  = DateTime.MinValue;
+                bool isLong         = true;
+                int  groupId        = 0;
+                int  partialIdx     = 0;
+                double groupEntryQty = 0;
+
+                foreach (var ex in execs)
+                {
+                    bool isBuy = ex.MarketPosition == MarketPosition.Long;
+                    double qty = ex.Quantity;
+
+                    if (runningQty == 0)
+                    {
+                        // Opening a new position
+                        runningQty    = isBuy ? qty : -qty;
+                        entryPrice    = ex.Price;
+                        entryTime     = ex.Time;
+                        isLong        = isBuy;
+                        groupId++;
+                        partialIdx    = 0;
+                        groupEntryQty = qty;
+                    }
+                    else if ((runningQty > 0 && !isBuy) || (runningQty < 0 && isBuy))
+                    {
+                        // Partial or full close
+                        double closeQty = Math.Min(Math.Abs(runningQty), qty);
+                        double pnl = isLong
+                            ? (ex.Price - entryPrice) * closeQty * Instrument.MasterInstrument.PointValue
+                            : (entryPrice - ex.Price) * closeQty * Instrument.MasterInstrument.PointValue;
+
+                        rawTrades.Add(new ReviewTrade
+                        {
+                            IsLong       = isLong,
+                            EntryPrice   = entryPrice,
+                            ExitPrice    = ex.Price,
+                            EntryTime    = entryTime,
+                            ExitTime     = ex.Time,
+                            Qty          = closeQty,
+                            PnL          = pnl,
+                            GroupId      = groupId,
+                            PartialIndex = partialIdx++,
+                        });
+
+                        runningQty += isBuy ? qty : -qty;
+                        if (Math.Abs(runningQty) < 0.001) runningQty = 0;
+                    }
+                    else
+                    {
+                        // Adding to position — weighted average entry
+                        double prevAbs = Math.Abs(runningQty);
+                        double newAbs  = prevAbs + qty;
+                        entryPrice    = (entryPrice * prevAbs + ex.Price * qty) / newAbs;
+                        runningQty   += isBuy ? qty : -qty;
+                        groupEntryQty = Math.Abs(runningQty);
+                    }
+                }
+
+                // Second pass: fill in group aggregate stats
+                var groupTotals = new Dictionary<int, (double qty, double pnl, int count)>();
+                foreach (var rt2 in rawTrades)
+                {
+                    if (!groupTotals.ContainsKey(rt2.GroupId))
+                        groupTotals[rt2.GroupId] = (0, 0, 0);
+                    var g2 = groupTotals[rt2.GroupId];
+                    groupTotals[rt2.GroupId] = (g2.qty + rt2.Qty, g2.pnl + rt2.PnL, g2.count + 1);
+                }
+
+                var trades = new List<ReviewTrade>();
+                foreach (var rt2 in rawTrades)
+                {
+                    var g2 = groupTotals[rt2.GroupId];
+                    var t2 = rt2;
+                    t2.TotalPartials  = g2.count;
+                    t2.GroupTotalQty  = g2.qty;
+                    t2.GroupTotalPnL  = g2.pnl;
+                    trades.Add(t2);
+                }
+
+                if (trades.Count == 0) { Print("RT TradeReview: executions found but no completed trades could be paired"); return; }
+
+                // Store trades — OnRender draws them via SharpDX
+                reviewTrades = trades;
+
+                // Hook mouse move for hover detection
+                if (!tradeMouseHooked && ChartControl != null)
+                {
+                    ChartControl.MouseMove += TradeReview_MouseMove;
+                    tradeMouseHooked = true;
+                }
+
+                ChartControl?.InvalidateVisual();
+                Print("RT TradeReview: loaded " + trades.Count + " trades for " + Instrument.MasterInstrument.Name);
+            }
+            catch (Exception ex) { Print("RT TradeReview error: " + ex.Message + "\n" + ex.StackTrace); }
+        }
+
+        private static SharpDX.Color4 MediaColorToSharpDX(System.Windows.Media.Color c, float alpha)
+        {
+            return new SharpDX.Color4(c.R / 255f, c.G / 255f, c.B / 255f, alpha);
+        }
+
+        private static System.Windows.Media.Color BrushToMediaColor(System.Windows.Media.Brush b)
+        {
+            if (b is SolidColorBrush scb) return scb.Color;
+            return System.Windows.Media.Colors.Gray;
+        }
+
+        private int GetBarIndexForTime(ChartControl cc, DateTime time)
+        {
+            try
+            {
+                if (cc.BarsArray == null || cc.BarsArray.Count == 0) return -1;
+                var bars = cc.BarsArray[0].Bars;
+                if (bars == null || bars.Count == 0) return -1;
+
+                int lo = 0, hi = bars.Count - 1, best = -1;
+                while (lo <= hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    DateTime bt = bars.GetTime(mid);
+                    if (bt <= time) { best = mid; lo = mid + 1; }
+                    else              hi = mid - 1;
+                }
+                return best;
+            }
+            catch { return -1; }
+        }
+
+        private struct ReviewTrade
+        {
+            public bool     IsLong;
+            public double   EntryPrice;
+            public double   ExitPrice;
+            public DateTime EntryTime;
+            public DateTime ExitTime;
+            public double   Qty;
+            public double   PnL;
+            public int      GroupId;       // same GroupId = same position entry
+            public int      PartialIndex;  // 0=only/first, 1=second partial, etc.
+            public int      TotalPartials; // how many exits in this group
+            public double   GroupTotalQty; // total qty for the whole position
+            public double   GroupTotalPnL; // total P&L for the whole position
+        }
+
+        private Canvas MakeTradeReviewIcon(double sz)
+        {
+            var c = new Canvas { Width = sz, Height = sz };
+            double m = 1.5;
+            Brush g = FB(0, 200, 100);
+            Brush r = FB(220, 70, 70);
+            Brush d = FB(100, 100, 100);
+
+            // Green box (long / profit) top half
+            var gBox = new System.Windows.Shapes.Rectangle
+            {
+                Width = sz - m * 2, Height = sz * 0.42,
+                Stroke = g, StrokeThickness = 1.2,
+                Fill = new SolidColorBrush(Color.FromArgb(50, 0, 200, 100)),
+            };
+            Canvas.SetLeft(gBox, m); Canvas.SetTop(gBox, m); c.Children.Add(gBox);
+
+            // Red box (short / loss) bottom half
+            var rBox = new System.Windows.Shapes.Rectangle
+            {
+                Width = sz - m * 2, Height = sz * 0.42,
+                Stroke = r, StrokeThickness = 1.2,
+                Fill = new SolidColorBrush(Color.FromArgb(50, 220, 70, 70)),
+            };
+            Canvas.SetLeft(rBox, m); Canvas.SetTop(rBox, sz * 0.54); c.Children.Add(rBox);
+
+            // Entry dashed line across middle
+            c.Children.Add(Ln(m, sz * 0.5, sz - m, sz * 0.5, d, 0.8));
+
+            return c;
+        }
+
+        private Canvas MakeDrawingTemplateIcon(double sz)
+        {
+            var c = new Canvas { Width = sz, Height = sz };
+            double m = 1.5;
+            Brush trk = FB(100, 100, 100);
+            Brush accent = FB(0, 200, 130);
+
+            // Pencil / drawing tool body (diagonal)
+            c.Children.Add(Ln(m + 1, sz - m - 1, sz * 0.55, m + 2, trk, 1.5));
+            // Pencil tip
+            c.Children.Add(Ln(m + 1, sz - m - 1, m + 4, sz - m - 4, accent, 1.5));
+            // Small template "card" overlay in top-right corner
+            var card = new System.Windows.Shapes.Rectangle
+            {
+                Width = sz * 0.42, Height = sz * 0.38,
+                Stroke = accent, StrokeThickness = 1.2,
+                Fill = FB(30, 30, 30),
+                RadiusX = 1, RadiusY = 1,
+            };
+            Canvas.SetLeft(card, sz * 0.54); Canvas.SetTop(card, m); c.Children.Add(card);
+            // Three lines inside card representing template properties
+            double cx = sz * 0.56; double cy = m + sz * 0.07; double cw = sz * 0.37;
+            c.Children.Add(Ln(cx, cy,          cx + cw * 0.8, cy,          accent, 0.8));
+            c.Children.Add(Ln(cx, cy + sz * 0.1, cx + cw,       cy + sz * 0.1, trk, 0.8));
+            c.Children.Add(Ln(cx, cy + sz * 0.2, cx + cw * 0.6, cy + sz * 0.2, trk, 0.8));
+
+            return c;
+        }
+
+        private void ShowDrawingTemplatePicker(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // Find selected drawing tool(s) on the chart
+                var selectedDrawings = DrawObjects
+                    .OfType<NinjaTrader.NinjaScript.DrawingTools.DrawingTool>()
+                    .Where(dt => dt.IsSelected)
+                    .ToList();
+
+                if (selectedDrawings.Count == 0)
+                {
+                    MessageBox.Show(
+                        "No drawing tool is currently selected on the chart.\n\nClick a drawing tool to select it, then click this button.",
+                        "Drawing Template Picker",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                // Use the first selected drawing (most recent click)
+                var drawing = selectedDrawings[0];
+                string toolTypeName = drawing.GetType().Name;
+                string displayName  = string.IsNullOrEmpty(drawing.Tag) ? toolTypeName : drawing.Tag;
+
+                // Find templates for this drawing tool type
+                // NT stores drawing templates in: templates/DrawingTool/<ToolTypeName>/*.xml
+                // Some versions also put them flat in templates/DrawingTool/*.xml
+                var templateFiles = new List<string>();
+
+                if (Directory.Exists(DrawingTemplateDir))
+                {
+                    // Check per-type subfolder first (standard NT8 location)
+                    string subFolder = Path.Combine(DrawingTemplateDir, toolTypeName);
+                    if (Directory.Exists(subFolder))
+                        templateFiles.AddRange(Directory.GetFiles(subFolder, "*.xml"));
+
+                    // Also check flat folder with type-prefixed names
+                    if (templateFiles.Count == 0)
+                    {
+                        foreach (var file in Directory.GetFiles(DrawingTemplateDir, "*.xml"))
+                        {
+                            string fn = Path.GetFileNameWithoutExtension(file);
+                            if (fn.IndexOf(toolTypeName, StringComparison.OrdinalIgnoreCase) >= 0)
+                                templateFiles.Add(file);
+                        }
+                    }
+
+                    // If still nothing, show all templates in the root as a fallback
+                    if (templateFiles.Count == 0)
+                        templateFiles.AddRange(Directory.GetFiles(DrawingTemplateDir, "*.xml"));
+                }
+
+                // Build picker window
+                var win = new Window
+                {
+                    Title = "Template Picker — " + displayName,
+                    Width = 340, Height = templateFiles.Count == 0 ? 160 : Math.Min(80 + templateFiles.Count * 40, 480),
+                    Background = FB(28, 28, 28),
+                    WindowStyle = WindowStyle.ToolWindow,
+                    ResizeMode = ResizeMode.NoResize,
+                    Topmost = true,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    Owner = chartWindow,
+                };
+
+                var outerStack = new StackPanel { Margin = new Thickness(10) };
+
+                // Header
+                outerStack.Children.Add(new TextBlock
+                {
+                    Text = "Select template to apply to:",
+                    FontSize = 11, Foreground = FB(150, 150, 150),
+                    Margin = new Thickness(0, 0, 0, 2),
+                });
+                outerStack.Children.Add(new TextBlock
+                {
+                    Text = displayName,
+                    FontSize = 13, FontWeight = FontWeights.SemiBold,
+                    Foreground = FB(0, 200, 130),
+                    Margin = new Thickness(0, 0, 0, 8),
+                });
+                outerStack.Children.Add(new Border
+                {
+                    Height = 1, Background = FB(60, 60, 60),
+                    Margin = new Thickness(0, 0, 0, 8),
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                });
+
+                if (templateFiles.Count == 0)
+                {
+                    outerStack.Children.Add(new TextBlock
+                    {
+                        Text = "No templates found for " + toolTypeName + ".\n\nSave a template first via the drawing tool's properties panel (right-click → Properties → Templates).",
+                        Foreground = FB(140, 140, 140),
+                        FontStyle = FontStyles.Italic,
+                        FontSize = 11,
+                        TextWrapping = TextWrapping.Wrap,
+                    });
+                }
+                else
+                {
+                    var scroll = new ScrollViewer
+                    {
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        MaxHeight = 360,
+                    };
+                    var listStack = new StackPanel();
+
+                    foreach (var tFile in templateFiles)
+                    {
+                        string tName = Path.GetFileNameWithoutExtension(tFile);
+                        string capturedFile = tFile;
+                        string capturedName = tName;
+                        var captured = drawing;
+
+                        var row = new Button
+                        {
+                            Content = tName,
+                            HorizontalContentAlignment = HorizontalAlignment.Left,
+                            Padding = new Thickness(10, 6, 10, 6),
+                            Margin = new Thickness(0, 1, 0, 1),
+                            Background = FB(40, 40, 40),
+                            BorderBrush = FB(60, 60, 60),
+                            BorderThickness = new Thickness(0, 0, 0, 1),
+                            Foreground = Brushes.White,
+                            FontSize = 12,
+                            Cursor = Cursors.Hand,
+                            Style = FlatStyle(),
+                        };
+                        row.MouseEnter += (s2, e2) => row.Background = FB(0, 80, 55);
+                        row.MouseLeave += (s2, e2) => row.Background = FB(40, 40, 40);
+
+                        row.Click += (s2, e2) =>
+                        {
+                            try
+                            {
+                                var xmlContent = File.ReadAllText(capturedFile);
+                                int applied = ApplyDrawingTemplateXml(captured, xmlContent);
+                                Print("RT: Applied drawing template '" + capturedName + "' (" + applied + " props) to " + captured.GetType().Name);
+
+                                ChartControl?.InvalidateVisual();
+
+                                // Flash the row green briefly
+                                row.Background = FB(0, 130, 70);
+                                row.Foreground = Brushes.White;
+                                var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
+                                t.Tick += (s3, e3) => { win.Close(); t.Stop(); };
+                                t.Start();
+                            }
+                            catch (Exception ex)
+                            {
+                                Print("RT: Drawing template error: " + ex.Message);
+                                MessageBox.Show("Error applying template:\n" + ex.Message, "Drawing Template Picker",
+                                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                            }
+                        };
+
+                        listStack.Children.Add(row);
+                    }
+
+                    scroll.Content = listStack;
+                    outerStack.Children.Add(scroll);
+                }
+
+                win.Content = outerStack;
+                win.Show();
+            }
+            catch (Exception ex) { Print("RT Drawing Template Picker Error: " + ex.Message + "\n" + ex.StackTrace); }
+        }
+
+        private int ApplyDrawingTemplateXml(NinjaTrader.NinjaScript.DrawingTools.DrawingTool drawing, string xmlContent)
+        {
+            int applied = 0;
+            try
+            {
+                var doc = new System.Xml.XmlDocument();
+                doc.LoadXml(xmlContent);
+
+                var props = drawing.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(p => p.CanRead && p.CanWrite)
+                    .ToDictionary(p => p.Name, p => p, StringComparer.OrdinalIgnoreCase);
+
+                foreach (System.Xml.XmlNode node in doc.SelectNodes("//*"))
+                {
+                    if (node.ChildNodes.Count == 1 && node.FirstChild is System.Xml.XmlText)
+                    {
+                        string name  = node.LocalName;
+                        string value = node.InnerText.Trim();
+
+                        PropertyInfo prop;
+                        if (props.TryGetValue(name, out prop))
+                        {
+                            try
+                            {
+                                object converted = ConvertTemplateValue(prop.PropertyType, value);
+                                if (converted != null)
+                                {
+                                    if (converted is SolidColorBrush scb)
+                                    {
+                                        var fresh = new SolidColorBrush(scb.Color);
+                                        fresh.Freeze();
+                                        converted = fresh;
+                                    }
+                                    prop.SetValue(drawing, converted);
+                                    applied++;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                // Ask the drawing to recalculate itself after property changes
+                try { drawing.SetState(State.Active); } catch { }
+            }
+            catch (Exception ex) { Print("RT: Drawing template XML parse error: " + ex.Message); }
+            return applied;
+        }
 
         private Canvas MakeCommandCenterIcon(double sz)
         {
@@ -2416,6 +3775,7 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                     WindowStartupLocation = WindowStartupLocation.CenterScreen,
                     Background = FB(28, 28, 28),
                     ResizeMode = ResizeMode.CanResize,
+                    Owner = chartWindow,  // FIX: keep popup with its chart; closes with it
                 };
 
                 var mainGrid = new Grid();
@@ -3346,6 +4706,12 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 string fileName = string.Format("{0}_{1}_{2}.png", instrument, tf, timestamp);
                 string filePath = Path.Combine(folder, fileName);
 
+                // FIX: BitBlt copies actual screen pixels, so anything overlapping
+                // the chart ends up in the PNG. Bring the chart to the foreground
+                // first; the Background-priority capture below runs after the
+                // activation has been processed.
+                try { chartWindow.Activate(); } catch { }
+
                 // Capture via screen BitBlt (gets DX content since it copies actual screen pixels)
                 ChartControl.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
                 {
@@ -3380,12 +4746,26 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                         using (var fs = new FileStream(filePath, FileMode.Create))
                             encoder.Save(fs);
 
+                        // Also place the PNG on the clipboard for instant paste
+                        // (Discord/X/etc). Clipboard can be momentarily locked by
+                        // another app, so retry once before giving up.
+                        try { Clipboard.SetImage(bmpSource); }
+                        catch
+                        {
+                            try
+                            {
+                                System.Threading.Thread.Sleep(100);
+                                Clipboard.SetImage(bmpSource);
+                            }
+                            catch (Exception cex) { Print("RT: Clipboard copy failed: " + cex.Message); }
+                        }
+
                         // Cleanup GDI resources
                         DeleteObject(hBitmap);
                         DeleteDC(memDC);
                         ReleaseDC(IntPtr.Zero, screenDC);
 
-                        Print("RT: Screenshot saved → " + filePath);
+                        Print("RT: Screenshot saved → " + filePath + " (and copied to clipboard)");
 
                         // Flash the button to confirm
                         screenshotButton.Opacity = 0.4;
@@ -3562,6 +4942,14 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
                 {
                     try
                     {
+                        // FIX: a cached IntervalSelector can go stale if NT rebuilds
+                        // the chart window's toolbar area — every switch then fails
+                        // silently. Validate it's still live (attached to a
+                        // PresentationSource); if not, drop the cache and re-find.
+                        if (cachedIntervalSelector != null
+                            && PresentationSource.FromVisual(cachedIntervalSelector) == null)
+                            cachedIntervalSelector = null;
+
                         // Find or use cached IntervalSelector
                         if (cachedIntervalSelector == null)
                         {
@@ -3618,7 +5006,12 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
 
                         Print("RT: Switched to " + periodType + " " + periodValue);
                     }
-                    catch (Exception ex) { Print("RT TF Switch Error: " + ex.Message + "\n" + ex.StackTrace); }
+                    catch (Exception ex)
+                    {
+                        // Drop the cache so the next click does a fresh search
+                        cachedIntervalSelector = null;
+                        Print("RT TF Switch Error: " + ex.Message + "\n" + ex.StackTrace);
+                    }
                 }));
             }
             catch (Exception ex) { Print("RT TF Switch Error: " + ex.Message); }
@@ -3735,6 +5128,50 @@ namespace NinjaTrader.NinjaScript.Indicators.RedTail
         [NinjaScriptProperty]
         [Display(Name="Timeframe List", Description="Comma-separated intervals. Numbers = minutes (60 = 1H), T = tick, R = range, S = second, Rn = renko, D = daily, W = weekly. Examples: 1,5,15,60,386t,4r,30s,4rn,D", Order=16, GroupName="Toolbar Settings")]
         public string TimeframeList { get; set; }
+
+        // ── HTS/STS Per-Chart Persistence ────────────────────────────────────
+        // Hidden indicator keys, separator-joined. Serialized with this chart in
+        // the workspace XML, so hide state no longer leaks between charts.
+        [Browsable(false)]
+        public string HiddenIndicatorsSerialized { get; set; }
+
+        // Persisted per chart: when true, indicator labels (the parameter text in
+        // the chart's top-left) are blanked on load and kept blank.
+        [Browsable(false)]
+        public bool HideIndicatorLabels { get; set; }
+
+        // ── Trade Review Appearance ──────────────────────────────────────────
+        [XmlIgnore]
+        [Display(Name="Win Color", Description="Color for profitable trades", Order=1, GroupName="Trade Review")]
+        public System.Windows.Media.Brush TRWinBrush { get; set; }
+        [Browsable(false)]
+        public string TRWinBrushSerialize
+        { get { return Serialize.BrushToString(TRWinBrush); } set { TRWinBrush = Serialize.StringToBrush(value); } }
+
+        [XmlIgnore]
+        [Display(Name="Loss Color", Description="Color for losing trades", Order=2, GroupName="Trade Review")]
+        public System.Windows.Media.Brush TRLossBrush { get; set; }
+        [Browsable(false)]
+        public string TRLossBrushSerialize
+        { get { return Serialize.BrushToString(TRLossBrush); } set { TRLossBrush = Serialize.StringToBrush(value); } }
+
+        [Range(0, 100)]
+        [Display(Name="Fill Opacity %", Description="Opacity of the trade box fill (0=transparent, 100=solid)", Order=3, GroupName="Trade Review")]
+        public int TRFillOpacity { get; set; }
+
+        [Range(0, 100)]
+        [Display(Name="Border Opacity %", Description="Opacity of the trade box border and lines", Order=4, GroupName="Trade Review")]
+        public int TRBorderOpacity { get; set; }
+
+        [Range(0.5, 4.0)]
+        [Display(Name="Border Width", Description="Thickness of the box border and lines in pixels", Order=5, GroupName="Trade Review")]
+        public double TRBorderWidth { get; set; }
+
+        [Display(Name="Show Entry/Exit Lines", Description="Draw dashed lines at entry and exit prices within the box", Order=6, GroupName="Trade Review")]
+        public bool TRShowLines { get; set; }
+
+        [Display(Name="Line Style", Description="Style of the entry/exit price lines", Order=7, GroupName="Trade Review")]
+        public TradeReviewLineStyle TRLineStyle { get; set; }
 
         #endregion
     }
