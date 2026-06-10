@@ -54,7 +54,6 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         private SharpDX.Direct2D1.Brush midLineBrushDx;
         private SharpDX.Direct2D1.Brush fillBrushDx;
         private SharpDX.Direct2D1.Brush textBrushDx;
-        private SharpDX.Direct2D1.Brush extLineBrushDx;
         private SharpDX.DirectWrite.TextFormat textFormatDx;
         #endregion
 
@@ -118,65 +117,14 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         [Display(Name = "Mid Line Dash Style", Description = "Mid line dash style", Order = 5, GroupName = "2. Mid Line")]
         public DashStyleHelper MidLineDashStyle { get; set; }
 
-        [NinjaScriptProperty]
-        [Display(Name = "Extend Mid Line Right", Description = "Extend the mid line to the right edge of the chart", Order = 6, GroupName = "2. Mid Line")]
-        public bool ExtendMidLineRight { get; set; }
-
-        [NinjaScriptProperty]
-        [Display(Name = "Extend Mid Line Left", Description = "Extend the mid line to the left edge of the chart", Order = 7, GroupName = "2. Mid Line")]
-        public bool ExtendMidLineLeft { get; set; }
-
-        // --- Extension Lines ---
-        [NinjaScriptProperty]
-        [Display(Name = "Extend Top Right", Description = "Extend top border line right", Order = 1, GroupName = "3. Extension Lines")]
-        public bool ExtendTopRight { get; set; }
-
-        [NinjaScriptProperty]
-        [Display(Name = "Extend Top Left", Description = "Extend top border line left", Order = 2, GroupName = "3. Extension Lines")]
-        public bool ExtendTopLeft { get; set; }
-
-        [NinjaScriptProperty]
-        [Display(Name = "Extend Bottom Right", Description = "Extend bottom border line right", Order = 3, GroupName = "3. Extension Lines")]
-        public bool ExtendBottomRight { get; set; }
-
-        [NinjaScriptProperty]
-        [Display(Name = "Extend Bottom Left", Description = "Extend bottom border line left", Order = 4, GroupName = "3. Extension Lines")]
-        public bool ExtendBottomLeft { get; set; }
-
-        [NinjaScriptProperty]
-        [XmlIgnore]
-        [Display(Name = "Extension Line Color", Description = "Color of extension lines", Order = 5, GroupName = "3. Extension Lines")]
-        public System.Windows.Media.Brush ExtensionLineBrush { get; set; }
-
-        [Browsable(false)]
-        public string ExtensionLineBrushSerialize
-        {
-            get { return Serialize.BrushToString(ExtensionLineBrush); }
-            set { ExtensionLineBrush = Serialize.StringToBrush(value); }
-        }
-
-        [NinjaScriptProperty]
-        [Range(1, 10)]
-        [Display(Name = "Extension Line Width", Description = "Width of extension lines", Order = 6, GroupName = "3. Extension Lines")]
-        public int ExtensionLineWidth { get; set; }
-
-        [NinjaScriptProperty]
-        [Display(Name = "Extension Line Dash Style", Description = "Extension line dash style", Order = 7, GroupName = "3. Extension Lines")]
-        public DashStyleHelper ExtensionLineDashStyle { get; set; }
-
-        [NinjaScriptProperty]
-        [Range(1, 100)]
-        [Display(Name = "Extension Line Opacity", Description = "Extension line opacity (1-100)", Order = 8, GroupName = "3. Extension Lines")]
-        public int ExtensionLineOpacity { get; set; }
-
         // --- Fill ---
         [NinjaScriptProperty]
-        [Display(Name = "Fill Mode", Description = "Fill mode for the rectangle", Order = 1, GroupName = "4. Fill")]
+        [Display(Name = "Fill Mode", Description = "Fill mode for the rectangle", Order = 1, GroupName = "3. Fill")]
         public RectFillMode FillMode { get; set; }
 
         [NinjaScriptProperty]
         [XmlIgnore]
-        [Display(Name = "Fill Color", Description = "Rectangle fill color", Order = 2, GroupName = "4. Fill")]
+        [Display(Name = "Fill Color", Description = "Rectangle fill color", Order = 2, GroupName = "3. Fill")]
         public System.Windows.Media.Brush FillBrush { get; set; }
 
         [Browsable(false)]
@@ -188,12 +136,12 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
         [NinjaScriptProperty]
         [Range(1, 100)]
-        [Display(Name = "Fill Opacity", Description = "Fill opacity (1-100)", Order = 3, GroupName = "4. Fill")]
+        [Display(Name = "Fill Opacity", Description = "Fill opacity (1-100)", Order = 3, GroupName = "3. Fill")]
         public int FillOpacity { get; set; }
 
         [NinjaScriptProperty]
         [XmlIgnore]
-        [Display(Name = "Gradient Color 2", Description = "Second color for gradient fill", Order = 4, GroupName = "4. Fill")]
+        [Display(Name = "Gradient Color 2", Description = "Second color for gradient fill", Order = 4, GroupName = "3. Fill")]
         public System.Windows.Media.Brush FillBrush2 { get; set; }
 
         [Browsable(false)]
@@ -202,6 +150,15 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             get { return Serialize.BrushToString(FillBrush2); }
             set { FillBrush2 = Serialize.StringToBrush(value); }
         }
+
+        // --- Extend ---
+        [NinjaScriptProperty]
+        [Display(Name = "Extend Right", Description = "Extend fill, border, and mid line to the right edge of the chart", Order = 1, GroupName = "4. Extend")]
+        public bool ExtendRight { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Extend Left", Description = "Extend fill, border, and mid line to the left edge of the chart", Order = 2, GroupName = "4. Extend")]
+        public bool ExtendLeft { get; set; }
 
         // --- Label ---
         [NinjaScriptProperty]
@@ -277,25 +234,15 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 BorderWidth     = 2;
                 BorderOpacity   = 100;
                 BorderDashStyle = DashStyleHelper.Solid;
+                ExtendRight     = false;
+                ExtendLeft      = false;
 
                 // Mid Line defaults
-                ShowMidLine         = true;
-                MidLineBrush        = System.Windows.Media.Brushes.Yellow;
-                MidLineWidth        = 1;
-                MidLineOpacity      = 100;
-                MidLineDashStyle    = DashStyleHelper.Dash;
-                ExtendMidLineRight  = false;
-                ExtendMidLineLeft   = false;
-
-                // Extension Lines defaults
-                ExtendTopRight          = false;
-                ExtendTopLeft           = false;
-                ExtendBottomRight       = false;
-                ExtendBottomLeft        = false;
-                ExtensionLineBrush      = System.Windows.Media.Brushes.DodgerBlue;
-                ExtensionLineWidth      = 1;
-                ExtensionLineDashStyle  = DashStyleHelper.Dot;
-                ExtensionLineOpacity    = 60;
+                ShowMidLine      = true;
+                MidLineBrush     = System.Windows.Media.Brushes.Yellow;
+                MidLineWidth     = 1;
+                MidLineOpacity   = 100;
+                MidLineDashStyle = DashStyleHelper.Dash;
 
                 // Fill defaults
                 FillMode    = RectFillMode.Solid;
@@ -304,24 +251,16 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 FillBrush2  = System.Windows.Media.Brushes.Transparent;
 
                 // Label defaults
-                ShowLabel       = false;
-                LabelText       = "";
-                LabelPos        = LabelPosition.TopLeft;
-                LabelBrush      = System.Windows.Media.Brushes.White;
-                LabelFontSize   = 12;
-                ShowPriceRange  = false;
-                ShowMidPrice    = false;
+                ShowLabel      = false;
+                LabelText      = "";
+                LabelPos       = LabelPosition.TopLeft;
+                LabelBrush     = System.Windows.Media.Brushes.White;
+                LabelFontSize  = 12;
+                ShowPriceRange = false;
+                ShowMidPrice   = false;
 
-                startAnchor = new ChartAnchor
-                {
-                    IsEditing   = true,
-                    DrawingTool = this
-                };
-                endAnchor = new ChartAnchor
-                {
-                    IsEditing   = true,
-                    DrawingTool = this
-                };
+                startAnchor = new ChartAnchor { IsEditing = true, DrawingTool = this };
+                endAnchor   = new ChartAnchor { IsEditing = true, DrawingTool = this };
             }
             else if (State == State.Terminated)
             {
@@ -331,12 +270,11 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
         private void DisposeResources()
         {
-            if (borderBrushDx != null)  { borderBrushDx.Dispose();  borderBrushDx = null; }
-            if (midLineBrushDx != null)  { midLineBrushDx.Dispose();  midLineBrushDx = null; }
-            if (fillBrushDx != null)     { fillBrushDx.Dispose();     fillBrushDx = null; }
-            if (textBrushDx != null)     { textBrushDx.Dispose();     textBrushDx = null; }
-            if (extLineBrushDx != null)  { extLineBrushDx.Dispose();  extLineBrushDx = null; }
-            if (textFormatDx != null)    { textFormatDx.Dispose();    textFormatDx = null; }
+            if (borderBrushDx  != null) { borderBrushDx.Dispose();  borderBrushDx  = null; }
+            if (midLineBrushDx != null) { midLineBrushDx.Dispose(); midLineBrushDx = null; }
+            if (fillBrushDx    != null) { fillBrushDx.Dispose();    fillBrushDx    = null; }
+            if (textBrushDx    != null) { textBrushDx.Dispose();    textBrushDx    = null; }
+            if (textFormatDx   != null) { textFormatDx.Dispose();   textFormatDx   = null; }
         }
         #endregion
 
@@ -356,11 +294,11 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             SharpDX.Direct2D1.DashStyle ds;
             switch (dashStyle)
             {
-                case DashStyleHelper.Dash:          ds = SharpDX.Direct2D1.DashStyle.Dash; break;
-                case DashStyleHelper.DashDot:       ds = SharpDX.Direct2D1.DashStyle.DashDot; break;
-                case DashStyleHelper.DashDotDot:    ds = SharpDX.Direct2D1.DashStyle.DashDotDot; break;
-                case DashStyleHelper.Dot:           ds = SharpDX.Direct2D1.DashStyle.Dot; break;
-                default:                            ds = SharpDX.Direct2D1.DashStyle.Solid; break;
+                case DashStyleHelper.Dash:       ds = SharpDX.Direct2D1.DashStyle.Dash;       break;
+                case DashStyleHelper.DashDot:    ds = SharpDX.Direct2D1.DashStyle.DashDot;    break;
+                case DashStyleHelper.DashDotDot: ds = SharpDX.Direct2D1.DashStyle.DashDotDot; break;
+                case DashStyleHelper.Dot:        ds = SharpDX.Direct2D1.DashStyle.Dot;        break;
+                default:                         ds = SharpDX.Direct2D1.DashStyle.Solid;      break;
             }
             return new SharpDX.Direct2D1.StrokeStyle(rt.Factory, new StrokeStyleProperties { DashStyle = ds });
         }
@@ -379,21 +317,15 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         #endregion
 
         #region Mouse Events
-        // Track what part of the rectangle is being edited
         private enum EditMode { None, TopLeft, TopRight, BottomLeft, BottomRight, TopEdge, BottomEdge, LeftEdge, RightEdge, Move }
         private EditMode    currentEditMode;
         private ChartAnchor lastMoveDataPoint;
 
         public override Cursor GetCursor(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, System.Windows.Point point)
         {
-            if (DrawingState == DrawingState.Building)
-                return Cursors.Pen;
-
-            if (DrawingState == DrawingState.Moving)
-                return Cursors.SizeAll;
-
-            if (IsLocked)
-                return Cursors.Arrow;
+            if (DrawingState == DrawingState.Building) return Cursors.Pen;
+            if (DrawingState == DrawingState.Moving)   return Cursors.SizeAll;
+            if (IsLocked)                              return Cursors.Arrow;
 
             float x1, y1, x2, y2;
             GetRectPixelCoords(chartControl, chartPanel, chartScale, out x1, out y1, out x2, out y2);
@@ -402,19 +334,16 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             float py = (float)point.Y;
             float tolerance = 8;
 
-            // Check corners
             if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y1) < tolerance) return Cursors.SizeNWSE;
             if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y1) < tolerance) return Cursors.SizeNESW;
             if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y2) < tolerance) return Cursors.SizeNESW;
             if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y2) < tolerance) return Cursors.SizeNWSE;
 
-            // Check edges
             if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y1) < tolerance) return Cursors.SizeNS;
             if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y2) < tolerance) return Cursors.SizeNS;
             if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x1) < tolerance) return Cursors.SizeWE;
             if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x2) < tolerance) return Cursors.SizeWE;
 
-            // Inside
             if (px >= x1 && px <= x2 && py >= y1 && py <= y2) return Cursors.SizeAll;
 
             return null;
@@ -435,9 +364,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             if (DrawingState == DrawingState.Building) return true;
             if (Anchors.All(a => a.Time < firstTimeOnChart) || Anchors.All(a => a.Time > lastTimeOnChart))
             {
-                if (ExtendTopRight || ExtendBottomRight || ExtendMidLineRight ||
-                    ExtendTopLeft || ExtendBottomLeft || ExtendMidLineLeft)
-                    return true;
+                if (ExtendRight || ExtendLeft) return true;
                 return false;
             }
             return true;
@@ -473,7 +400,6 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 float py = (float)p.Y;
                 float tolerance = 8;
 
-                // Corners - allow resizing from any corner
                 if (Math.Abs(px - x1) < tolerance && Math.Abs(py - y1) < tolerance)
                     { currentEditMode = EditMode.TopLeft; DrawingState = DrawingState.Editing; return; }
                 if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y1) < tolerance)
@@ -483,7 +409,6 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 if (Math.Abs(px - x2) < tolerance && Math.Abs(py - y2) < tolerance)
                     { currentEditMode = EditMode.BottomRight; DrawingState = DrawingState.Editing; return; }
 
-                // Edges - allow resizing one dimension
                 if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y1) < tolerance)
                     { currentEditMode = EditMode.TopEdge; DrawingState = DrawingState.Editing; return; }
                 if (px >= x1 - tolerance && px <= x2 + tolerance && Math.Abs(py - y2) < tolerance)
@@ -493,7 +418,6 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 if (py >= y1 - tolerance && py <= y2 + tolerance && Math.Abs(px - x2) < tolerance)
                     { currentEditMode = EditMode.RightEdge; DrawingState = DrawingState.Editing; return; }
 
-                // Inside = Move the whole thing
                 if (px >= x1 && px <= x2 && py >= y1 && py <= y2)
                 {
                     currentEditMode = EditMode.Move;
@@ -508,27 +432,16 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
         public override void OnMouseMove(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
         {
-            // === BUILDING ===
             if (DrawingState == DrawingState.Building && !StartAnchor.IsEditing)
             {
                 dataPoint.CopyDataValues(EndAnchor);
                 return;
             }
 
-            // === EDITING: resize corners or edges ===
             if (DrawingState == DrawingState.Editing)
             {
-                // Determine which anchor holds the min/max time and price
-                // StartAnchor and EndAnchor define two opposite corners
-                // We need to figure out which anchor's Time/Price to update
                 bool startIsLeft  = StartAnchor.Time <= EndAnchor.Time;
                 bool startIsTop   = StartAnchor.Price >= EndAnchor.Price;
-
-                // Map screen corners to anchor properties:
-                // TopLeft     = (earlier time, higher price)
-                // TopRight    = (later time, higher price)
-                // BottomLeft  = (earlier time, lower price)
-                // BottomRight = (later time, lower price)
 
                 ChartAnchor leftAnchor   = startIsLeft ? StartAnchor : EndAnchor;
                 ChartAnchor rightAnchor  = startIsLeft ? EndAnchor : StartAnchor;
@@ -538,49 +451,37 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 switch (currentEditMode)
                 {
                     case EditMode.TopLeft:
-                        leftAnchor.Time      = dataPoint.Time;
-                        leftAnchor.SlotIndex = dataPoint.SlotIndex;
-                        topAnchor.Price      = dataPoint.Price;
-                        break;
-                    case EditMode.TopRight:
-                        rightAnchor.Time      = dataPoint.Time;
-                        rightAnchor.SlotIndex = dataPoint.SlotIndex;
-                        topAnchor.Price       = dataPoint.Price;
-                        break;
-                    case EditMode.BottomLeft:
-                        leftAnchor.Time        = dataPoint.Time;
-                        leftAnchor.SlotIndex   = dataPoint.SlotIndex;
-                        bottomAnchor.Price     = dataPoint.Price;
-                        break;
-                    case EditMode.BottomRight:
-                        rightAnchor.Time      = dataPoint.Time;
-                        rightAnchor.SlotIndex = dataPoint.SlotIndex;
-                        bottomAnchor.Price    = dataPoint.Price;
-                        break;
-                    case EditMode.TopEdge:
+                        leftAnchor.Time = dataPoint.Time; leftAnchor.SlotIndex = dataPoint.SlotIndex;
                         topAnchor.Price = dataPoint.Price;
                         break;
-                    case EditMode.BottomEdge:
+                    case EditMode.TopRight:
+                        rightAnchor.Time = dataPoint.Time; rightAnchor.SlotIndex = dataPoint.SlotIndex;
+                        topAnchor.Price  = dataPoint.Price;
+                        break;
+                    case EditMode.BottomLeft:
+                        leftAnchor.Time   = dataPoint.Time; leftAnchor.SlotIndex = dataPoint.SlotIndex;
                         bottomAnchor.Price = dataPoint.Price;
                         break;
+                    case EditMode.BottomRight:
+                        rightAnchor.Time   = dataPoint.Time; rightAnchor.SlotIndex = dataPoint.SlotIndex;
+                        bottomAnchor.Price = dataPoint.Price;
+                        break;
+                    case EditMode.TopEdge:    topAnchor.Price    = dataPoint.Price; break;
+                    case EditMode.BottomEdge: bottomAnchor.Price = dataPoint.Price; break;
                     case EditMode.LeftEdge:
-                        leftAnchor.Time      = dataPoint.Time;
-                        leftAnchor.SlotIndex = dataPoint.SlotIndex;
+                        leftAnchor.Time = dataPoint.Time; leftAnchor.SlotIndex = dataPoint.SlotIndex;
                         break;
                     case EditMode.RightEdge:
-                        rightAnchor.Time      = dataPoint.Time;
-                        rightAnchor.SlotIndex = dataPoint.SlotIndex;
+                        rightAnchor.Time = dataPoint.Time; rightAnchor.SlotIndex = dataPoint.SlotIndex;
                         break;
                 }
                 return;
             }
 
-            // === MOVING: translate both anchors ===
             if (DrawingState == DrawingState.Moving && lastMoveDataPoint != null)
             {
                 foreach (ChartAnchor anchor in Anchors)
                     anchor.MoveAnchor(lastMoveDataPoint, dataPoint, chartControl, chartPanel, chartScale, this);
-
                 dataPoint.CopyDataValues(lastMoveDataPoint);
                 return;
             }
@@ -588,8 +489,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
         public override void OnMouseUp(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
         {
-            if (DrawingState == DrawingState.Building)
-                return;
+            if (DrawingState == DrawingState.Building) return;
 
             if (DrawingState == DrawingState.Editing)
             {
@@ -617,7 +517,6 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             float x1, y1, x2, y2;
             GetRectPixelCoords(chartControl, chartPanel, chartScale, out x1, out y1, out x2, out y2);
 
-            // Just the 4 corners for click-to-select hit testing
             return new System.Windows.Point[]
             {
                 new System.Windows.Point(x1, y1),
@@ -639,33 +538,34 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             RenderTarget rt = RenderTarget;
             if (rt == null || rt.IsDisposed) return;
 
-            // Dispose old brushes
             DisposeResources();
 
-            // Create brushes
-            borderBrushDx   = CreateDxBrush(rt, BorderBrush, BorderOpacity);
-            midLineBrushDx  = CreateDxBrush(rt, MidLineBrush, MidLineOpacity);
-            fillBrushDx     = CreateDxBrush(rt, FillBrush, FillOpacity);
-            textBrushDx     = CreateDxBrush(rt, LabelBrush, 100);
-            extLineBrushDx  = CreateDxBrush(rt, ExtensionLineBrush, ExtensionLineOpacity);
+            borderBrushDx  = CreateDxBrush(rt, BorderBrush, BorderOpacity);
+            midLineBrushDx = CreateDxBrush(rt, MidLineBrush, MidLineOpacity);
+            fillBrushDx    = CreateDxBrush(rt, FillBrush, FillOpacity);
+            textBrushDx    = CreateDxBrush(rt, LabelBrush, 100);
 
             if (borderBrushDx == null) return;
 
-            // Get pixel coordinates
             float x1, y1, x2, y2;
             GetRectPixelCoords(chartControl, chartPanel, chartScale, out x1, out y1, out x2, out y2);
 
-            float midY = (y1 + y2) / 2f;
-            float panelW = (float)chartPanel.W;
+            float midY      = (y1 + y2) / 2f;
+            float edgeLeft  = 0f;
+            float edgeRight = (float)chartPanel.W;
+
+            // Extended bounds used by fill, border, and mid line
+            float fillX1 = ExtendLeft  ? edgeLeft  : x1;
+            float fillX2 = ExtendRight ? edgeRight : x2;
 
             // --- Draw Fill ---
             if (FillMode == RectFillMode.Solid && fillBrushDx != null)
             {
-                rt.FillRectangle(new SharpDX.RectangleF(x1, y1, x2 - x1, y2 - y1), fillBrushDx);
+                rt.FillRectangle(new SharpDX.RectangleF(fillX1, y1, fillX2 - fillX1, y2 - y1), fillBrushDx);
             }
             else if (FillMode == RectFillMode.Gradient)
             {
-                System.Windows.Media.SolidColorBrush scb1 = FillBrush as System.Windows.Media.SolidColorBrush;
+                System.Windows.Media.SolidColorBrush scb1 = FillBrush  as System.Windows.Media.SolidColorBrush;
                 System.Windows.Media.SolidColorBrush scb2 = FillBrush2 as System.Windows.Media.SolidColorBrush;
                 if (scb1 != null && scb2 != null)
                 {
@@ -675,54 +575,40 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
                     SharpDX.Direct2D1.LinearGradientBrushProperties lgbp = new SharpDX.Direct2D1.LinearGradientBrushProperties
                     {
-                        StartPoint = new SharpDX.Vector2(x1, y1),
-                        EndPoint   = new SharpDX.Vector2(x1, y2)
+                        StartPoint = new SharpDX.Vector2(fillX1, y1),
+                        EndPoint   = new SharpDX.Vector2(fillX1, y2)
                     };
-
                     SharpDX.Direct2D1.GradientStopCollection gsc = new SharpDX.Direct2D1.GradientStopCollection(rt,
                         new SharpDX.Direct2D1.GradientStop[]
                         {
                             new SharpDX.Direct2D1.GradientStop { Color = c1, Position = 0f },
                             new SharpDX.Direct2D1.GradientStop { Color = c2, Position = 1f }
                         });
-
                     SharpDX.Direct2D1.LinearGradientBrush lgb = new SharpDX.Direct2D1.LinearGradientBrush(rt, lgbp, gsc);
-                    rt.FillRectangle(new SharpDX.RectangleF(x1, y1, x2 - x1, y2 - y1), lgb);
+                    rt.FillRectangle(new SharpDX.RectangleF(fillX1, y1, fillX2 - fillX1, y2 - y1), lgb);
                     lgb.Dispose();
                     gsc.Dispose();
                 }
             }
 
-            // --- Draw Border ---
+            // --- Draw Border + Extensions ---
             SharpDX.Direct2D1.StrokeStyle borderStyle = CreateStrokeStyle(rt, BorderDashStyle);
-            rt.DrawLine(new SharpDX.Vector2(x1, y1), new SharpDX.Vector2(x2, y1), borderBrushDx, BorderWidth, borderStyle);
-            rt.DrawLine(new SharpDX.Vector2(x1, y2), new SharpDX.Vector2(x2, y2), borderBrushDx, BorderWidth, borderStyle);
+
+            // Vertical edges always at rect bounds
             rt.DrawLine(new SharpDX.Vector2(x1, y1), new SharpDX.Vector2(x1, y2), borderBrushDx, BorderWidth, borderStyle);
             rt.DrawLine(new SharpDX.Vector2(x2, y1), new SharpDX.Vector2(x2, y2), borderBrushDx, BorderWidth, borderStyle);
+
+            // Top and bottom lines extend when toggled
+            rt.DrawLine(new SharpDX.Vector2(fillX1, y1), new SharpDX.Vector2(fillX2, y1), borderBrushDx, BorderWidth, borderStyle);
+            rt.DrawLine(new SharpDX.Vector2(fillX1, y2), new SharpDX.Vector2(fillX2, y2), borderBrushDx, BorderWidth, borderStyle);
+
             borderStyle.Dispose();
 
-            // --- Draw Extension Lines ---
-            if (extLineBrushDx != null)
-            {
-                SharpDX.Direct2D1.StrokeStyle extStyle = CreateStrokeStyle(rt, ExtensionLineDashStyle);
-                if (ExtendTopRight)
-                    rt.DrawLine(new SharpDX.Vector2(x2, y1), new SharpDX.Vector2(panelW, y1), extLineBrushDx, ExtensionLineWidth, extStyle);
-                if (ExtendTopLeft)
-                    rt.DrawLine(new SharpDX.Vector2(x1, y1), new SharpDX.Vector2(0, y1), extLineBrushDx, ExtensionLineWidth, extStyle);
-                if (ExtendBottomRight)
-                    rt.DrawLine(new SharpDX.Vector2(x2, y2), new SharpDX.Vector2(panelW, y2), extLineBrushDx, ExtensionLineWidth, extStyle);
-                if (ExtendBottomLeft)
-                    rt.DrawLine(new SharpDX.Vector2(x1, y2), new SharpDX.Vector2(0, y2), extLineBrushDx, ExtensionLineWidth, extStyle);
-                extStyle.Dispose();
-            }
-
-            // --- Draw Mid Line ---
+            // --- Draw Mid Line + Extensions ---
             if (ShowMidLine && midLineBrushDx != null)
             {
                 SharpDX.Direct2D1.StrokeStyle midStyle = CreateStrokeStyle(rt, MidLineDashStyle);
-                float mlX1 = ExtendMidLineLeft ? 0 : x1;
-                float mlX2 = ExtendMidLineRight ? panelW : x2;
-                rt.DrawLine(new SharpDX.Vector2(mlX1, midY), new SharpDX.Vector2(mlX2, midY), midLineBrushDx, MidLineWidth, midStyle);
+                rt.DrawLine(new SharpDX.Vector2(fillX1, midY), new SharpDX.Vector2(fillX2, midY), midLineBrushDx, MidLineWidth, midStyle);
                 midStyle.Dispose();
             }
 
@@ -760,7 +646,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 {
                     SharpDX.DirectWrite.TextLayout textLayout = new SharpDX.DirectWrite.TextLayout(
                         NinjaTrader.Core.Globals.DirectWriteFactory,
-                        displayText, textFormatDx, panelW, (float)chartPanel.H);
+                        displayText, textFormatDx, edgeRight, (float)chartPanel.H);
 
                     float textW   = textLayout.Metrics.Width;
                     float textH   = textLayout.Metrics.Height;
@@ -771,15 +657,15 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
                     switch (LabelPos)
                     {
-                        case LabelPosition.TopLeft:         lx = x1 + padding;                   ly = y1 + padding; break;
-                        case LabelPosition.TopCenter:       lx = (x1 + x2) / 2f - textW / 2f;   ly = y1 + padding; break;
-                        case LabelPosition.TopRight:        lx = x2 - textW - padding;            ly = y1 + padding; break;
-                        case LabelPosition.MiddleLeft:      lx = x1 + padding;                   ly = midY - textH / 2f; break;
-                        case LabelPosition.MiddleCenter:    lx = (x1 + x2) / 2f - textW / 2f;   ly = midY - textH / 2f; break;
-                        case LabelPosition.MiddleRight:     lx = x2 - textW - padding;            ly = midY - textH / 2f; break;
-                        case LabelPosition.BottomLeft:      lx = x1 + padding;                   ly = y2 - textH - padding; break;
-                        case LabelPosition.BottomCenter:    lx = (x1 + x2) / 2f - textW / 2f;   ly = y2 - textH - padding; break;
-                        case LabelPosition.BottomRight:     lx = x2 - textW - padding;            ly = y2 - textH - padding; break;
+                        case LabelPosition.TopLeft:      lx = x1 + padding;                  ly = y1 + padding;         break;
+                        case LabelPosition.TopCenter:    lx = (x1 + x2) / 2f - textW / 2f;  ly = y1 + padding;         break;
+                        case LabelPosition.TopRight:     lx = x2 - textW - padding;           ly = y1 + padding;         break;
+                        case LabelPosition.MiddleLeft:   lx = x1 + padding;                  ly = midY - textH / 2f;    break;
+                        case LabelPosition.MiddleCenter: lx = (x1 + x2) / 2f - textW / 2f;  ly = midY - textH / 2f;    break;
+                        case LabelPosition.MiddleRight:  lx = x2 - textW - padding;           ly = midY - textH / 2f;    break;
+                        case LabelPosition.BottomLeft:   lx = x1 + padding;                  ly = y2 - textH - padding; break;
+                        case LabelPosition.BottomCenter: lx = (x1 + x2) / 2f - textW / 2f;  ly = y2 - textH - padding; break;
+                        case LabelPosition.BottomRight:  lx = x2 - textW - padding;           ly = y2 - textH - padding; break;
                     }
 
                     rt.DrawTextLayout(new SharpDX.Vector2(lx, ly), textLayout, textBrushDx);
@@ -791,8 +677,6 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             if (IsSelected || DrawingState == DrawingState.Editing)
             {
                 float anchorSize = 6f;
-
-                // 4 corner handles - white fill with blue ring
                 SharpDX.Vector2[] corners = new SharpDX.Vector2[]
                 {
                     new SharpDX.Vector2(x1, y1),
