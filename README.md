@@ -27,6 +27,8 @@
 
 ## Overview
 
+**PLEASE NOTE** Only RedTailToolbar.cs goes in custom\indicators. ALL other .cs files are drawing tools, so they go in custom\drawing tools
+
 RedTail Toolbar installs a persistent toolbar row at the top of your chart with quick-access buttons for NinjaTrader's drawing tools, plus built-in chart utilities like a lag timer, ATR display, break even button, pan mode, indicator visibility manager, command center, screenshot button, timeframe switcher, and drawing management controls. It also includes 8 custom drawing tools that extend NinjaTrader's default toolset with features commonly found in platforms like TradingView.
 
 ---
