@@ -6,6 +6,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Threading;
 using System.Windows.Media;
 using System.Xml.Serialization;
 using NinjaTrader.Cbi;
@@ -83,6 +84,13 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         private List<KeyValuePair<int, double>> avwapPoints = new List<KeyValuePair<int, double>>();
         private int avwapAnchorBarIdx = -1;
         private DateTime lastAvwapCalcTime = DateTime.MinValue;
+        private int lastAvwapBarCount = -1;
+        
+        // Live update / auto-extend tracking
+        private int  lastLiveBarCount  = -1;          // detect new bars for live recalc
+        private bool liveRangeActive   = false;        // true when end anchor is at/past last bar
+        private DispatcherTimer liveTimer  = null;     // drives chart repaints for live mode
+        private ChartControl    timerChartControl = null; // cached ref for timer callback
         
         // Cluster levels data
         private List<ClusterLevelInfo> clusterLevels = new List<ClusterLevelInfo>();
@@ -253,8 +261,53 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                 Cluster9LevelColor          = Brushes.SaddleBrown;
                 Cluster10LevelColor         = Brushes.SlateGray;
 
+                // ===== Live Behavior Settings =====
+                LiveUpdate          = true;
+                AutoExtendEnd       = true;
+
                 startAnchor = new ChartAnchor();
                 endAnchor   = new ChartAnchor();
+            }
+            else if (State == State.Active)
+            {
+                // Start the live-update timer — fires every 500ms and invalidates
+                // the chart so OnRender runs and picks up new bars / price movement.
+                // Only runs when LiveUpdate or AutoExtendEnd is enabled.
+                StartLiveTimer();
+            }
+            else if (State == State.Terminated)
+            {
+                StopLiveTimer();
+            }
+        }
+
+        private void StartLiveTimer()
+        {
+            StopLiveTimer();
+            if (!LiveUpdate && !AutoExtendEnd) return;
+
+            liveTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            liveTimer.Tick += (s, e) =>
+            {
+                try
+                {
+                    if (timerChartControl != null)
+                        timerChartControl.InvalidateVisual();
+                }
+                catch { StopLiveTimer(); }
+            };
+            liveTimer.Start();
+        }
+
+        private void StopLiveTimer()
+        {
+            if (liveTimer != null)
+            {
+                liveTimer.Stop();
+                liveTimer = null;
             }
         }
 
@@ -338,6 +391,10 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             copy.ExtendAVWAPRight   = ExtendAVWAPRight;
             copy.ShowAVWAPLabel     = ShowAVWAPLabel;
 
+            // Live Behavior
+            copy.LiveUpdate          = LiveUpdate;
+            copy.AutoExtendEnd       = AutoExtendEnd;
+
             // Cluster Levels
             copy.DisplayClusterLevels    = DisplayClusterLevels;
             copy.ClusterCount            = ClusterCount;
@@ -397,6 +454,31 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                     endAnchor.IsEditing = false;
                     DrawingState = DrawingState.Normal;
                     IsSelected = false;
+
+                    // Snap end anchor to the current bar so live mode is
+                    // immediately active — no need to drag it to the right edge
+                    if ((LiveUpdate || AutoExtendEnd) && chartControl.BarsArray != null && chartControl.BarsArray.Count > 0)
+                    {
+                        try
+                        {
+                            var bars = chartControl.BarsArray[0].Bars;
+                            if (bars != null && bars.Count > 0)
+                            {
+                                // Only snap if the end anchor is the later-in-time one
+                                // (i.e. user drew left-to-right or top-to-bottom in time)
+                                bool endIsLater = endAnchor.Time >= startAnchor.Time;
+                                ChartAnchor snapTarget = endIsLater ? endAnchor : startAnchor;
+                                DateTime latestTime    = bars.GetTime(bars.Count - 1);
+                                if (snapTarget.Time < latestTime)
+                                {
+                                    snapTarget.Time  = latestTime;
+                                    // Keep the clicked price — only the time moves right
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
                     profileDirty = true;
                 }
             }
@@ -587,6 +669,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             lastCalcEndTime   = rangeEnd;
             profileDirty = false;
             lastAvwapCalcTime = DateTime.MinValue; // force AVWAP recalc when profile recalculates
+            lastAvwapBarCount = -1;
 
             volumes.Clear();
             volumePolarities.Clear();
@@ -741,11 +824,12 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             // The AVWAP anchors at the start anchor's time (where user first clicked)
             DateTime anchorTime = startAnchor.Time;
             
-            // Only recalculate if anchor moved
-            if (anchorTime == lastAvwapCalcTime && avwapPoints.Count > 0)
+            // Recalculate if anchor moved OR if new bars have arrived (for real-time extension)
+            if (anchorTime == lastAvwapCalcTime && bars.Count == lastAvwapBarCount && avwapPoints.Count > 0)
                 return;
             
             lastAvwapCalcTime = anchorTime;
+            lastAvwapBarCount = bars.Count;
             avwapPoints.Clear();
             avwapAnchorBarIdx = -1;
 
@@ -955,6 +1039,9 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         public override void OnRender(ChartControl chartControl, ChartScale chartScale)
         {
             if (chartControl == null || chartScale == null) return;
+            // Keep a reference so the timer can call InvalidateVisual
+            if (timerChartControl == null)
+                timerChartControl = chartControl;
             SharpDX.Direct2D1.RenderTarget rt = RenderTarget;
             if (rt == null) return;
             ChartPanel cp = chartControl.ChartPanels[chartScale.PanelIndex];
@@ -975,9 +1062,66 @@ namespace NinjaTrader.NinjaScript.DrawingTools
             // Calculate volume profile from bar data
             if (chartControl.BarsArray != null && chartControl.BarsArray.Count > 0)
             {
-                CalculateVolumeProfile(chartControl, chartControl.BarsArray[0]);
-                CalculateAVWAP(chartControl, chartControl.BarsArray[0]);
-                CalculateClusterLevels(chartControl, chartControl.BarsArray[0]);
+                var cbars = chartControl.BarsArray[0];
+
+                // ── Live behavior: only applies once the drawing is placed ──
+                if (DrawingState == DrawingState.Normal && cbars != null && cbars.Bars != null)
+                {
+                    Bars liveBars  = cbars.Bars;
+                    int  totalBars = liveBars.Count;
+
+                    if (totalBars > 0)
+                    {
+                        // Which anchor is the time-later one (the "end")
+                        bool endIsLater        = endAnchor.Time >= startAnchor.Time;
+                        ChartAnchor liveEnd    = endIsLater ? endAnchor   : startAnchor;
+                        ChartAnchor liveStart  = endIsLater ? startAnchor : endAnchor;
+
+                        DateTime latestBarTime = liveBars.GetTime(totalBars - 1);
+                        double   latestHigh    = liveBars.GetHigh(totalBars - 1);
+                        double   latestLow     = liveBars.GetLow(totalBars - 1);
+
+                        // ── AutoExtendEnd: move end anchor if price breaks out ──
+                        if (AutoExtendEnd)
+                        {
+                            double endPrice   = liveEnd.Price;
+                            double startPrice = liveStart.Price;
+                            bool trendDown    = startPrice > endPrice;   // drew high-to-low
+                            bool trendUp      = startPrice < endPrice;   // drew low-to-high
+
+                            bool broke = (trendDown && latestLow  < endPrice) ||
+                                         (trendUp   && latestHigh > endPrice);
+
+                            if (broke)
+                            {
+                                liveEnd.Price = trendDown ? latestLow : latestHigh;
+                                liveEnd.Time  = latestBarTime;
+                                profileDirty  = true;
+                            }
+                        }
+
+                        // ── LiveUpdate: invalidate cache when a new bar arrives ──
+                        if (LiveUpdate)
+                        {
+                            bool newBar = (totalBars != lastLiveBarCount);
+
+                            if (newBar)
+                            {
+                                // Advance the end anchor to the new bar so the range
+                                // always extends to the current candle
+                                liveEnd.Time  = latestBarTime;
+                                profileDirty      = true;
+                                lastAvwapBarCount = -1;   // also force AVWAP recalc
+                            }
+                            lastLiveBarCount = totalBars;
+                            liveRangeActive  = true;
+                        }
+                    }
+                }
+
+                CalculateVolumeProfile(chartControl, cbars);
+                CalculateAVWAP(chartControl, cbars);
+                CalculateClusterLevels(chartControl, cbars);
             }
 
             // Determine profile pixel width as percentage of the range width
@@ -1915,6 +2059,17 @@ namespace NinjaTrader.NinjaScript.DrawingTools
         [XmlIgnore][Display(Name = "Cluster 10 Color", GroupName = "10. Cluster Colors", Order = 10)]
         public System.Windows.Media.Brush Cluster10LevelColor { get; set; }
         [Browsable(false)] public string Cluster10LevelColorSerialize { get { return Serialize.BrushToString(Cluster10LevelColor); } set { Cluster10LevelColor = Serialize.StringToBrush(value); } }
+
+        // ===== Live Behavior Properties =====
+        [Display(Name = "Live Update",
+            Description = "Continuously recalculate profile, POC, VA, and clusters as new bars print within the drawn range.",
+            Order = 1, GroupName = "11. Live Behavior")]
+        public bool LiveUpdate { get; set; }
+
+        [Display(Name = "Auto-Extend End",
+            Description = "Move the end anchor when price breaks through it, tracking the emerging extreme (low for downtrend draws, high for uptrend draws).",
+            Order = 2, GroupName = "11. Live Behavior")]
+        public bool AutoExtendEnd { get; set; }
 
         #endregion
     }
